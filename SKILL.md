@@ -162,20 +162,21 @@ Triggers: "figure out where all my skills came from", "batch claim unknown
 skills", "auto-detect sources for installed skills", or proactively offer when
 Scenario A surfaces several `unclaimed` rows.
 
-This is the **automated** counterpart to the manual claim wizard below. Run it
-first; fall back to the wizard only for the leftover `needs_review` /
-`no_match` items.
+This is an **agent-assisted source tracing** workflow. The scripts collect
+mechanical evidence; the agent decides source identity; `sources.py` registers
+confirmed sources. Do not treat global GitHub Code Search as proof of origin:
+it finds copies, mirrors, dotfiles, registries, and marketplace entries too.
 
 **Default invocation — DO NOT add `--dry-run` unless the user explicitly asks
-for a preview.** Audit is not destructive: it only writes `sources.json`
-(adding records for previously unclaimed skills) and possibly appends to
-`whitelist.json`. No skill files are touched. Mistakes are trivially
-reversible (`sources.py remove <name>` and re-run). Treat audit like
-`update_skill.py`, not like `install_skill.py` or delete — no confirmation
-needed beforehand, just report results afterwards.
+for a preview.** Audit is not destructive: it only writes `sources.json` for
+low-risk evidence (`.git/config`, embedded source URL, or trusted whitelist).
+GitHub Code Search results are evidence-only and must go through agent review.
+No skill files are touched. Mistakes are reversible (`sources.py remove <name>`
+and re-run). Treat audit like `update_skill.py`, not like `install_skill.py` or
+delete — no confirmation needed beforehand, just report results afterwards.
 
 ```powershell
-python <skills-manager>/scripts/audit_unclaimed.py            # default: auto-claim high-confidence and write sources.json
+python <skills-manager>/scripts/audit_unclaimed.py            # collect evidence and auto-claim only trusted/explicit sources
 python <skills-manager>/scripts/audit_unclaimed.py --dry-run  # ONLY when user says "先看看不要动" / "preview only"
 ```
 
@@ -183,27 +184,31 @@ If you (agent) reflexively add `--dry-run` "to be safe", you'll surprise the
 user the same way they were surprised before this note was added: the script
 will dutifully report 1.0-similarity hits but write nothing.
 
-Per skill the script runs three gates in order, stopping at the first match:
+Per skill the script runs gates in order, stopping at the first trusted match:
 
 1. **`.git/config` inspection** (offline). If the skill directory is itself a
    git checkout pointing at github.com, claim it with the live branch +
    `rev-parse HEAD`.
-2. **Whitelist + similarity** (raw.githubusercontent.com fetch). The whitelist
+2. **Embedded GitHub URL in SKILL.md**. A source URL written inside the local
+   skill is treated as explicit evidence, then verified via raw + similarity.
+3. **Whitelist + similarity** (raw.githubusercontent.com fetch). The whitelist
    is the union of `KNOWN_UPSTREAMS` (built-in baseline) and `whitelist.json`
-   (auto-grown — see below).
-3. **GitHub Code Search** (requires `gh` CLI logged in). Extracts a
-   distinctive phrase from the SKILL.md description, searches for SKILL.md
-   files containing it, then verifies each candidate via raw + similarity.
+   (trusted sources confirmed by user/agent workflow).
+4. **GitHub Code Search** (requires `gh` CLI logged in). Searches for similar
+   SKILL.md files, verifies candidates via raw + similarity, and returns a
+   shortlist for agent review. **Search does not claim.**
 
-Confidence rules (all gates):
-- `high` (both ratios ≥ 0.90) → auto-claim. The recorded `installed_revision`
-  is the upstream HEAD SHA **only when similarity is exactly 1.0** (local
-  content byte-equals upstream HEAD). Otherwise `installed_revision` is
-  recorded as `null` — the source repo is correctly identified, but local is
-  a different version (older / forked / locally-edited), and recording HEAD
-  would falsely make inventory report "up to date".
-- `mid` → `needs_review` with candidates attached.
-- `low` / no candidates matched → `no_match`.
+Confidence rules:
+- Trusted/explicit gates (`.git/config`, embedded URL, whitelist):
+  - `high` (both ratios ≥ 0.90) → auto-claim.
+  - `installed_revision` is the upstream HEAD SHA **only when similarity is
+    exactly 1.0**. Otherwise it is recorded as `null`, so inventory reports
+    `update_available` and `update_skill.py` can re-align it.
+- GitHub Code Search:
+  - `high` / exact / `skills/<name>/SKILL.md` → `needs_review`, not auto-claim.
+  - `mid` → `needs_review`.
+  - `low` / no candidates → `no_match`.
+  - Reason: Code Search finds copies, not origins.
 
 When `installed_revision` is `null`, both `inventory --check-remote` and
 `check_remote.py` surface the skill as `update_available` so the user/agent
@@ -211,11 +216,8 @@ is prompted to run `update_skill.py`, which overwrites the local copy with
 upstream HEAD and writes the now-correct `installed_revision`. This is the
 self-healing path: claim makes a conservative record, update aligns it.
 
-**Whitelist auto-growth.** When Code Search auto-claims ≥ 2 skills from the
-same `(url, branch)` with a consistent subpath template
-(e.g. all under `skills/<skill_name>/`), the script appends an entry to
-`whitelist.json` so the next audit skips Code Search for that source. The
-built-in `KNOWN_UPSTREAMS` is never modified by the script.
+**Whitelist.** `whitelist.json` is for trusted sources already confirmed by the
+user/agent workflow. Do not auto-grow it from global Code Search evidence.
 
 **Search disabled gracefully** when `gh` is missing/unauthenticated, or after
 3 consecutive API failures (network/rate-limit). The summary reports
@@ -227,29 +229,38 @@ bridge the two, every report with `decision: needs_review` or `no_match`
 carries a `search_query_hint` field — a phrase extracted from the SKILL.md
 description, suitable for direct use with WebSearch.
 
-When you (agent) see unresolved items, especially when `search_used: false`:
-1. For each report with `search_query_hint`, run
-   `WebSearch("<hint>" SKILL.md github)`.
-2. Inspect the top results for `github.com/.../SKILL.md` links.
-3. Confirm a candidate with the user, then `install_skill.py` (if not yet
-   on disk) or `sources.py claim-remote` (if already present).
-This turns "we couldn't search" into "the agent searches once per unresolved
-skill", without re-introducing the noisy manual loop the wizard used to be.
+When you (agent) see `needs_review` from Code Search:
+1. Read the shortlist evidence: repo URL, path, similarity, `exact_match`,
+   `search_path_strong`, `source_likelihood`, and `why`.
+2. Treat dotfiles, `.agents/skills`, `.claude/skills`, registry, marketplace,
+   mirror, awesome-list, and ordinary product repos as likely copies.
+3. Prefer official or purpose-built source repos, standard `skills/<name>/`
+   paths, and repos whose name/owner clearly match the skill family.
+4. If a likely source repo emerges, run a repo-limited check:
+   ```powershell
+   gh search code "<title or unique phrase>" --repo <owner/repo> --filename SKILL.md
+   ```
+5. Once source identity is clear, run `sources.py claim-remote` with the
+   candidate's url/branch/subpath. If multiple candidates still look plausible,
+   ask the user instead of guessing.
+
+When `search_used: false` or a report has only `search_query_hint`, use
+WebSearch as an agent-side fallback. The fallback is for finding evidence, not
+automatic registration.
 
 Output is a JSON `{summary, reports, inventory_after}` payload. Render to the
 user as:
 - **"已自动登记 K 个"** — show each (name → repo+subpath, source: git_dir /
-  whitelist / search). High-confidence is already written by the script;
-  no further action.
-- **"需要确认 N 个"** — list the top candidate (with ratio) for each. Once
-  the user OKs a candidate, **agent runs `sources.py claim-remote`** with the
-  candidate's url/branch/subpath. **Do NOT re-run audit expecting it to write
-  the mid-confidence ones — audit only writes high-confidence.**
+  embedded_url / whitelist). These were trusted/explicit matches.
+- **"需要确认 N 个"** — list top candidates and evidence. For Code Search
+  results, explain that search found similar files but cannot decide origin.
+  Once source identity is clear, **agent runs `sources.py claim-remote`** with
+  the candidate's url/branch/subpath. Do not re-run audit expecting Code Search
+  to write the record.
 - **"未识别 M 个"** — for each, use `search_query_hint` to run WebSearch (or
   ask the user directly). Once you have a source, **agent runs
   `sources.py claim-remote`** (if from GitHub) or `sources.py claim-local`
   (if user-authored). Same rule: don't re-run audit.
-- If `whitelist_appended` is non-empty, mention "以后这些来源将走白名单加速".
 - Then re-render the Scenario A table from `inventory_after` so the user sees
   the new state in one shot — no need to invoke `inventory.py` separately.
   (`inventory_after` is `null` when `--dry-run` is used, because sources.json

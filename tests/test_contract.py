@@ -927,7 +927,7 @@ class AuditWithSearchTests(SkillManagerContractTests):
             sys.stdout = sys.__stdout__
             os.chdir(cwd)
 
-    def test_search_auto_claims_high_confidence(self) -> None:
+    def test_search_high_confidence_needs_review_without_claiming(self) -> None:
         skill_text = (
             "---\nname: searched-skill\n"
             "description: A long enough description that we can extract distinctive search words from it without trouble at all.\n"
@@ -948,19 +948,23 @@ class AuditWithSearchTests(SkillManagerContractTests):
             "path": "skills/searched-skill/SKILL.md",
         }], None)
         mod.fetch_remote_skill_md = lambda _u, _b, _s, timeout=15: (skill_text, None)
-        mod.fetch_remote_sha = lambda _u, _b: ("c0ffee" * 6, None)
+        mod.fetch_remote_sha = lambda _u, _b: (_ for _ in ()).throw(
+            AssertionError("Code Search evidence must not resolve SHA or claim")
+        )
 
         payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
 
         sources = json.loads((self.manager / "sources.json").read_text(encoding="utf-8"))
-        rec = sources["skills"]["searched-skill"]
-        self.assertEqual(rec["url"], "https://github.com/alice/kit")
-        self.assertEqual(rec["branch"], "main")
-        self.assertEqual(rec["subpath"], "skills/searched-skill")
-        self.assertEqual(rec["installed_revision"], "c0ffee" * 6)
-        self.assertEqual(payload["summary"]["auto_claimed"], 1)
+        self.assertNotIn("searched-skill", sources["skills"])
+        self.assertEqual(payload["summary"]["auto_claimed"], 0)
+        self.assertEqual(payload["summary"]["needs_review"], 1)
         self.assertTrue(payload["summary"]["search_used"])
-        self.assertEqual(payload["reports"][0]["method"], "search")
+        rep = payload["reports"][0]
+        self.assertEqual(rep["method"], "search")
+        self.assertEqual(rep["decision"], "needs_review")
+        self.assertEqual(rep["candidates"][0]["source"], "search")
+        self.assertTrue(rep["candidates"][0]["exact_match"])
+        self.assertTrue(rep["candidates"][0]["search_path_strong"])
 
     def test_search_tries_multiple_queries_and_larger_result_sets(self) -> None:
         skill_text = (
@@ -992,11 +996,14 @@ class AuditWithSearchTests(SkillManagerContractTests):
 
         mod.gh_search.search_skill_md = _search
         mod.fetch_remote_skill_md = lambda _u, _b, _s, timeout=15: (skill_text, None)
-        mod.fetch_remote_sha = lambda _u, _b: ("c0ffee" * 6, None)
+        mod.fetch_remote_sha = lambda _u, _b: (_ for _ in ()).throw(
+            AssertionError("Code Search evidence must not resolve SHA or claim")
+        )
 
         payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
 
-        self.assertEqual(payload["summary"]["auto_claimed"], 1)
+        self.assertEqual(payload["summary"]["auto_claimed"], 0)
+        self.assertEqual(payload["summary"]["needs_review"], 1)
         self.assertIn(("karpathy-guidelines", 20), calls)
         self.assertIn(("Karpathy Guidelines", 20), calls)
         self.assertGreater(len(calls), 1)
@@ -1049,7 +1056,7 @@ class AuditWithSearchTests(SkillManagerContractTests):
         self.assertEqual(len(rep["result_count_by_query"]), 3)
         self.assertIn("elapsed_ms", rep)
 
-    def test_search_exact_strong_path_early_stops_and_resolves_sha_once(self) -> None:
+    def test_search_exact_strong_path_needs_review_without_sha(self) -> None:
         skill_text = "---\nname: winner\ndescription: enough words for searching this exact skill source.\n---\n\n# Winner\n"
         sd = self.write_skill("winner")
         (sd / "SKILL.md").write_text(skill_text, encoding="utf-8")
@@ -1074,25 +1081,24 @@ class AuditWithSearchTests(SkillManagerContractTests):
             ], None)
 
         fetched = []
-        sha_calls = []
         mod.gh_search.search_skill_md = _search
         mod.fetch_remote_skill_md = lambda _u, _b, subpath, timeout=15: (
             fetched.append(subpath) or skill_text, None
         )
-        mod.fetch_remote_sha = lambda url, branch: (
-            sha_calls.append((url, branch)) or ("c0ffee" * 6, None)
+        mod.fetch_remote_sha = lambda _u, _b: (_ for _ in ()).throw(
+            AssertionError("Code Search strong exact match must still not resolve SHA")
         )
 
         payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
 
         rep = next(r for r in payload["reports"] if r["name"] == "winner")
-        self.assertEqual(rep["decision"], "auto_claim")
-        self.assertEqual(rep["claim_record"]["url"], "https://github.com/source/skills")
-        self.assertEqual(rep["claim_record"]["installed_revision"], "c0ffee" * 6)
+        self.assertEqual(rep["decision"], "needs_review")
+        self.assertIsNone(rep["claim_record"])
         self.assertEqual(fetched, ["skills/winner"])
-        self.assertEqual(sha_calls, [("https://github.com/source/skills", "main")])
         self.assertEqual(rep["verified_candidate_count"], 1)
         self.assertGreater(rep["skipped_candidate_count"], 0)
+        self.assertEqual(rep["candidates"][0]["url"], "https://github.com/source/skills")
+        self.assertTrue(rep["candidates"][0]["search_path_strong"])
 
     def test_search_multiple_weak_exact_matches_need_review_without_sha(self) -> None:
         skill_text = "---\nname: copied\ndescription: enough words for searching copied exact matches.\n---\n\n# Copied\n"
@@ -1168,7 +1174,7 @@ class AuditWithSearchTests(SkillManagerContractTests):
         self.assertIn("mid-run", payload["summary"]["search_disabled_reason"] or "")
         self.assertEqual(payload["summary"]["auto_claimed"], 0)
 
-    def test_derive_whitelist_additions_groups_correctly(self) -> None:
+    def test_derive_whitelist_additions_ignores_search_evidence(self) -> None:
         mod = self._load_audit_module()
         reports = [
             {"name": "foo", "method": "search", "decision": "auto_claim", "claim_record": {
@@ -1180,12 +1186,7 @@ class AuditWithSearchTests(SkillManagerContractTests):
             {"name": "wl", "method": "whitelist", "decision": "auto_claim", "claim_record": {
                 "url": "https://github.com/whitelist/repo", "branch": "main", "subpath": "skills/wl"}},
         ]
-        additions = mod.derive_whitelist_additions(reports, [])
-        self.assertEqual(additions, [{
-            "url": "https://github.com/alice/kit",
-            "branch": "main",
-            "subpath_template": "skills/{name}",
-        }])
+        self.assertEqual(mod.derive_whitelist_additions(reports, []), [])
 
     def test_derive_whitelist_skips_already_present(self) -> None:
         mod = self._load_audit_module()
@@ -1262,7 +1263,7 @@ class AuditWithSearchTests(SkillManagerContractTests):
         self.assertEqual(rep["decision"], "auto_claim")
         self.assertNotIn("search_query_hint", rep)
 
-    def test_audit_appends_to_whitelist_json(self) -> None:
+    def test_search_does_not_append_to_whitelist_json(self) -> None:
         skill_text_a = (
             "---\nname: alpha\n"
             "description: A long enough description that we can extract distinctive search words from it without trouble at all.\n"
@@ -1302,21 +1303,16 @@ class AuditWithSearchTests(SkillManagerContractTests):
             return (skill_text_b, None)
 
         mod.fetch_remote_skill_md = _fetch_raw
-        mod.fetch_remote_sha = lambda _u, _b: ("a" * 40, None)
+        mod.fetch_remote_sha = lambda _u, _b: (_ for _ in ()).throw(
+            AssertionError("Code Search must not resolve SHA or claim")
+        )
 
         payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
 
-        self.assertEqual(payload["summary"]["auto_claimed"], 2)
-        self.assertEqual(len(payload["summary"]["whitelist_appended"]), 1)
-        self.assertEqual(payload["summary"]["whitelist_appended"][0], {
-            "url": "https://github.com/alice/kit",
-            "branch": "main",
-            "subpath_template": "skills/{name}",
-        })
-
-        wl_data = json.loads((self.manager / "whitelist.json").read_text(encoding="utf-8"))
-        self.assertEqual(len(wl_data["entries"]), 1)
-        self.assertEqual(wl_data["entries"][0]["url"], "https://github.com/alice/kit")
+        self.assertEqual(payload["summary"]["auto_claimed"], 0)
+        self.assertEqual(payload["summary"]["needs_review"], 2)
+        self.assertEqual(payload["summary"]["whitelist_appended"], [])
+        self.assertFalse((self.manager / "whitelist.json").exists())
 
 
 if __name__ == "__main__":

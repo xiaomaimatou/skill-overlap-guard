@@ -1,7 +1,7 @@
-"""Audit unclaimed sibling skills and auto-claim the high-confidence ones.
+"""Audit unclaimed sibling skills and collect source evidence.
 
 Usage:
-    python audit_unclaimed.py            # auto-claim high-confidence matches
+    python audit_unclaimed.py            # auto-claim trusted/explicit matches; collect search evidence
     python audit_unclaimed.py --dry-run  # report only, do not modify sources.json
 
 Per-skill flow (ordered gates, stop at first verified match):
@@ -15,20 +15,22 @@ Per-skill flow (ordered gates, stop at first verified match):
     4. GitHub Code Search (only if `gh` CLI is available and authenticated):
        extract a distinctive phrase from the SKILL.md description, search for
        other SKILL.md files containing it, then verify each candidate via the
-       same raw + similarity flow. A circuit breaker disables this gate after
-       repeated API failures so a single network outage doesn't slow audits.
+       same raw + similarity flow. Search results are evidence-only: Code
+       Search finds copies, not origins, so it never auto-claims. A circuit
+       breaker disables this gate after repeated API failures so a single
+       network outage doesn't slow audits.
 
 Confidence rules (from similarity.py):
-    - "high"  -> auto-claim; installed_revision is set only on exact content match.
+    - "high" in trusted/explicit gates -> auto-claim; installed_revision is set
+      only on exact content match.
+    - "high" in Code Search -> needs_review with evidence.
     - "mid"   -> needs_review, surface candidates to the user.
     - "low" / no candidates -> no_match (likely user-authored or unknown).
 
 We deliberately do NOT auto claim-local on no_match; the user decides.
 
-After all skills are processed, derive whitelist additions from the new
-auto-claims: any (url, branch) that produced >=2 claims with a consistent
-subpath template (e.g. "skills/{name}") is appended to whitelist.json so the
-next audit can skip Code Search for that source.
+Whitelist entries are trusted source templates confirmed outside global Code
+Search. The script does not auto-grow whitelist from search evidence.
 
 Finally (when NOT --dry-run), runs `inventory.scan(check_remote=True)` once
 and attaches the result as `inventory_after` so callers see the updated
@@ -437,20 +439,26 @@ def _candidate_from_search_item(item: dict) -> dict:
     }
 
 
-def _claim_record_for_search_winner(enriched: dict) -> tuple[dict | None, str | None]:
-    exact = enriched.get("full_ratio") == 1.0 and enriched.get("head_ratio") == 1.0
-    installed_revision: str | None = None
-    if exact:
-        sha, err = fetch_remote_sha(enriched["url"], enriched["branch"])
-        if err:
-            return None, f"matched but cannot resolve revision: {err}"
-        installed_revision = sha
-    return {
-        "url": enriched["url"],
-        "branch": enriched["branch"],
-        "subpath": enriched["subpath"],
-        "installed_revision": installed_revision,
-    }, None
+def _search_candidate_likelihood(name: str, item: dict) -> tuple[str, str]:
+    path = (item.get("path") or "").replace("\\", "/").lower()
+    repo = f"{item.get('owner', '')}/{item.get('repo', '')}".lower()
+    if _is_strong_search_path(name, path):
+        return "possible_source", "standard skills/<name>/SKILL.md path"
+    noisy_markers = (
+        ".agents/skills",
+        ".claude/skills",
+        ".codex/skills",
+        "dotfiles",
+        "marketplace",
+        "mirror",
+        "registry",
+        "awesome",
+    )
+    if any(marker in path or marker in repo for marker in noisy_markers):
+        return "mirror", "path or repository looks like a copied skill collection"
+    if path.endswith(f"/{name.lower()}/skill.md"):
+        return "possible_source", "path ends with <name>/SKILL.md"
+    return "unknown", "similar content found by global Code Search"
 
 
 def audit_via_search(name: str, skill_dir: Path, local_text: str, local_head: str,
@@ -500,8 +508,6 @@ def audit_via_search(name: str, skill_dir: Path, local_text: str, local_head: st
 
     all_items.sort(key=lambda item: _search_candidate_sort_key(name, item))
 
-    best_strong_high: dict | None = None
-    best_high_full: float = -1.0
     has_mid = False
     high_seen = False
     verified = 0
@@ -518,30 +524,26 @@ def audit_via_search(name: str, skill_dir: Path, local_text: str, local_head: st
         verified += 1
         enriched["upstream_path"] = item.get("path", "")
         enriched["search_path_strong"] = _is_strong_search_path(name, enriched["upstream_path"])
+        enriched["exact_match"] = (
+            enriched.get("full_ratio") == 1.0 and enriched.get("head_ratio") == 1.0
+        )
+        likelihood, why = _search_candidate_likelihood(name, item)
+        enriched["source_likelihood"] = likelihood
+        enriched["why"] = why
         report["candidates"].append(enriched)
         if enriched.get("confidence") == "high":
             high_seen = True
-            if enriched["search_path_strong"] and enriched.get("full_ratio", 0) > best_high_full:
-                best_strong_high = enriched
-                best_high_full = enriched["full_ratio"]
-                if enriched.get("full_ratio") == 1.0 and enriched.get("head_ratio") == 1.0:
-                    break
+            if enriched["search_path_strong"] and enriched["exact_match"]:
+                break
         elif enriched.get("confidence") == "mid":
             has_mid = True
 
     report["verified_candidate_count"] = verified
     report["skipped_candidate_count"] = max(0, len(all_items) - verified) + overflow_skipped
 
-    if best_strong_high is not None:
-        record, err = _claim_record_for_search_winner(best_strong_high)
-        if err:
-            report["decision"] = "needs_review"
-            report["error"] = err
-        else:
-            report["decision"] = "auto_claim"
-            report["claim_record"] = record
-    elif high_seen or has_mid:
+    if high_seen or has_mid:
         report["decision"] = "needs_review"
+        report["reason"] = "Code Search found similar files; source identity requires agent review"
 
     report["elapsed_ms"] = round((time.monotonic() - started) * 1000)
     return report
@@ -635,7 +637,7 @@ def audit_one(name: str, skill_dir: Path, upstreams: list[dict],
         return {"name": name, **wl_report}
 
     search_report = audit_via_search(name, skill_dir, local_text, local_head, breaker)
-    if search_report["decision"] == "auto_claim":
+    if not embedded_report["candidates"] and not wl_report["candidates"]:
         return {"name": name, **search_report}
 
     if search_report["decision"] == "needs_review" or wl_report["decision"] == "needs_review":
@@ -652,6 +654,7 @@ def audit_one(name: str, skill_dir: Path, upstreams: list[dict],
         "skipped_candidate_count",
         "search_verify_budget",
         "elapsed_ms",
+        "reason",
     ):
         if key in search_report:
             wl_report[key] = search_report[key]
@@ -661,42 +664,8 @@ def audit_one(name: str, skill_dir: Path, upstreams: list[dict],
 
 
 def derive_whitelist_additions(reports: list[dict], existing: list[dict]) -> list[dict]:
-    """Find (url, branch) that produced >=2 search-sourced claims with the
-    same subpath template like 'skills/{name}'. Skip patterns we already have.
-    """
-    seen_keys = {
-        (e.get("url", ""), e.get("branch", ""), e.get("subpath_template", ""))
-        for e in existing
-    }
-
-    groups: dict[tuple[str, str], list[tuple[str, str]]] = {}
-    for r in reports:
-        if r.get("decision") != "auto_claim" or r.get("method") != "search":
-            continue
-        rec = r.get("claim_record") or {}
-        url = rec.get("url", "")
-        branch = rec.get("branch", "")
-        sub = rec.get("subpath", "")
-        if not url or not branch:
-            continue
-        groups.setdefault((url, branch), []).append((r["name"], sub))
-
-    additions: list[dict] = []
-    for (url, branch), pairs in groups.items():
-        if len(pairs) < 2:
-            continue
-        templates = {sub.replace(name, "{name}") for name, sub in pairs if name in sub}
-        if len(templates) != 1:
-            continue
-        template = next(iter(templates))
-        if (url, branch, template) in seen_keys:
-            continue
-        additions.append({
-            "url": url,
-            "branch": branch,
-            "subpath_template": template,
-        })
-    return additions
+    """Search evidence is not a trusted source; do not auto-grow whitelist."""
+    return []
 
 
 def run_audit(dry_run: bool = False) -> dict:
