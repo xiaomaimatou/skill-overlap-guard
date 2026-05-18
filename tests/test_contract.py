@@ -127,8 +127,6 @@ class SkillManagerContractTests(unittest.TestCase):
                     "auto_claimed": 1,
                     "needs_review": 0,
                     "no_match": 0,
-                    "search_used": False,
-                    "search_disabled_reason": "gh unavailable",
                 },
                 "reports": [{"name": "unknown-skill", "decision": "auto_claim"}],
                 "inventory_after": [{
@@ -159,7 +157,6 @@ class SkillManagerContractTests(unittest.TestCase):
         self.assertEqual(payload["audit"]["auto_claimed"], 1)
         self.assertEqual(payload["audit"]["needs_review"], 0)
         self.assertEqual(payload["audit"]["no_match"], 0)
-        self.assertEqual(payload["audit"]["search_disabled_reason"], "gh unavailable")
 
     def test_inventory_audit_unclaimed_skips_audit_when_everything_is_claimed(self) -> None:
         self.write_skill("private-skill")
@@ -511,7 +508,7 @@ class AuditUnclaimedTests(SkillManagerContractTests):
     """Audit script: .git detection + whitelist + similarity."""
 
     def _load_audit_module(self):
-        for cached in ("_common", "similarity", "check_remote", "gh_search", "inventory", "audit_under_test"):
+        for cached in ("_common", "similarity", "check_remote", "inventory", "audit_under_test"):
             sys.modules.pop(cached, None)
         sys.path.insert(0, str(self.manager / "scripts"))
         try:
@@ -626,7 +623,6 @@ class AuditUnclaimedTests(SkillManagerContractTests):
 
         mod = self._load_audit_module()
         mod.KNOWN_UPSTREAMS[:] = []
-        mod.gh_search.gh_available = lambda: False
         mod.fetch_remote_skill_md = lambda _u, _b, _s, timeout=15: (local_text, None)
         mod.fetch_remote_sha = lambda _u, _b: ("c0ffee" * 6, None)
 
@@ -817,16 +813,16 @@ class AuditUnclaimedTests(SkillManagerContractTests):
         self.assertEqual(payload["summary"]["auto_claimed"], 1)
 
 
-class GhSearchPhraseTests(unittest.TestCase):
-    """Pure-function tests for the query phrase extractor."""
+class WebSearchPhraseTests(unittest.TestCase):
+    """Pure-function tests for the agent WebSearch query phrase extractor."""
 
     def _load_module(self):
-        sys.modules.pop("gh_search", None)
+        sys.modules.pop("audit_unclaimed", None)
         scripts = SKILL_MANAGER / "scripts"
         sys.path.insert(0, str(scripts))
         try:
-            import gh_search  # type: ignore
-            return gh_search
+            import audit_unclaimed  # type: ignore
+            return audit_unclaimed
         finally:
             sys.path.pop(0)
 
@@ -841,66 +837,17 @@ class GhSearchPhraseTests(unittest.TestCase):
         self.assertGreaterEqual(len(phrase.split()), 8)
         self.assertIn("installed skills in the current sibling directory", phrase)
 
-    def test_search_skill_md_uses_gh_search_code_with_utf8_and_limit(self) -> None:
-        mod = self._load_module()
-        calls = []
-
-        def _fake_run(args, **kwargs):
-            calls.append((args, kwargs))
-            return subprocess.CompletedProcess(args, 0, stdout=json.dumps([{
-                "repository": {"nameWithOwner": "alice/kit", "defaultBranchRef": {"name": "trunk"}},
-                "path": "skills/demo/SKILL.md",
-                "url": "https://github.com/alice/kit/blob/trunk/skills/demo/SKILL.md",
-            }]), stderr="")
-
-        original_run = mod.subprocess.run
-        mod.subprocess.run = _fake_run
-        try:
-            candidates, err = mod.search_skill_md("Karpathy Guidelines", max_results=50)
-        finally:
-            mod.subprocess.run = original_run
-
-        self.assertIsNone(err)
-        self.assertEqual(candidates[0]["owner"], "alice")
-        self.assertEqual(candidates[0]["repo"], "kit")
-        self.assertEqual(candidates[0]["branch"], "trunk")
-        self.assertEqual(candidates[0]["subpath"], "skills/demo")
-        args, kwargs = calls[0]
-        self.assertEqual(args[:3], ["gh", "search", "code"])
-        self.assertIn("--filename", args)
-        self.assertIn("--limit", args)
-        self.assertIn("50", args)
-        self.assertEqual(kwargs["encoding"], "utf-8")
-        self.assertEqual(kwargs["errors"], "replace")
-
-    def test_gh_available_uses_utf8_decoding(self) -> None:
-        mod = self._load_module()
-        calls = []
-
-        def _fake_run(args, **kwargs):
-            calls.append((args, kwargs))
-            return subprocess.CompletedProcess(args, 0, stdout="", stderr="✓ Logged in")
-
-        original_run = mod.subprocess.run
-        mod.subprocess.run = _fake_run
-        try:
-            self.assertTrue(mod.gh_available())
-        finally:
-            mod.subprocess.run = original_run
-        self.assertEqual(calls[0][1]["encoding"], "utf-8")
-        self.assertEqual(calls[0][1]["errors"], "replace")
-
     def test_returns_none_for_short_description(self) -> None:
         mod = self._load_module()
         self.assertIsNone(mod.extract_query_phrase("hello world"))
         self.assertIsNone(mod.extract_query_phrase(""))
 
 
-class AuditWithSearchTests(SkillManagerContractTests):
-    """audit_unclaimed.py third gate (GitHub Code Search) and whitelist growth."""
+class AuditWebSearchHintTests(SkillManagerContractTests):
+    """audit_unclaimed.py leaves open-world source tracing to the agent."""
 
     def _load_audit_module(self):
-        for cached in ("_common", "similarity", "check_remote", "gh_search", "inventory", "audit_under_test"):
+        for cached in ("_common", "similarity", "check_remote", "inventory", "audit_under_test"):
             sys.modules.pop(cached, None)
         sys.path.insert(0, str(self.manager / "scripts"))
         try:
@@ -927,252 +874,22 @@ class AuditWithSearchTests(SkillManagerContractTests):
             sys.stdout = sys.__stdout__
             os.chdir(cwd)
 
-    def test_search_high_confidence_needs_review_without_claiming(self) -> None:
-        skill_text = (
-            "---\nname: searched-skill\n"
-            "description: A long enough description that we can extract distinctive search words from it without trouble at all.\n"
-            "---\n\n# Body\n"
+    def test_unresolved_skill_emits_websearch_hint_without_search_summary_fields(self) -> None:
+        self.write_skill(
+            "websearch-needed",
+            "Distinctive description that should become an agent WebSearch query hint.",
         )
-        sd = self.write_skill("searched-skill")
-        (sd / "SKILL.md").write_text(skill_text, encoding="utf-8")
         self.write_sources({})
 
         mod = self._load_audit_module()
         mod.KNOWN_UPSTREAMS[:] = []
-        mod.gh_search.gh_available = lambda: True
-        mod.gh_search.search_skill_md = lambda _phrase, max_results=3: ([{
-            "owner": "alice",
-            "repo": "kit",
-            "branch": "main",
-            "subpath": "skills/searched-skill",
-            "path": "skills/searched-skill/SKILL.md",
-        }], None)
-        mod.fetch_remote_skill_md = lambda _u, _b, _s, timeout=15: (skill_text, None)
-        mod.fetch_remote_sha = lambda _u, _b: (_ for _ in ()).throw(
-            AssertionError("Code Search evidence must not resolve SHA or claim")
-        )
-
         payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
 
-        sources = json.loads((self.manager / "sources.json").read_text(encoding="utf-8"))
-        self.assertNotIn("searched-skill", sources["skills"])
-        self.assertEqual(payload["summary"]["auto_claimed"], 0)
-        self.assertEqual(payload["summary"]["needs_review"], 1)
-        self.assertTrue(payload["summary"]["search_used"])
-        rep = payload["reports"][0]
-        self.assertEqual(rep["method"], "search")
-        self.assertEqual(rep["decision"], "needs_review")
-        self.assertEqual(rep["candidates"][0]["source"], "search")
-        self.assertTrue(rep["candidates"][0]["exact_match"])
-        self.assertTrue(rep["candidates"][0]["search_path_strong"])
-
-    def test_search_tries_multiple_queries_and_larger_result_sets(self) -> None:
-        skill_text = (
-            "---\nname: karpathy-guidelines\n"
-            "description: Behavioral guidelines to reduce common LLM coding mistakes when writing, reviewing, or refactoring code.\n"
-            "---\n\n# Karpathy Guidelines\n\n"
-            "Derived from Andrej Karpathy's observations about common coding mistakes.\n"
-        )
-        sd = self.write_skill("karpathy-guidelines")
-        (sd / "SKILL.md").write_text(skill_text, encoding="utf-8")
-        self.write_sources({})
-
-        mod = self._load_audit_module()
-        mod.KNOWN_UPSTREAMS[:] = []
-        mod.gh_search.gh_available = lambda: True
-        calls = []
-
-        def _search(query, max_results=50):
-            calls.append((query, max_results))
-            if query == "Karpathy Guidelines":
-                return ([{
-                    "owner": "alice",
-                    "repo": "kit",
-                    "branch": "main",
-                    "subpath": "skills/karpathy-guidelines",
-                    "path": "skills/karpathy-guidelines/SKILL.md",
-                }], None)
-            return ([], None)
-
-        mod.gh_search.search_skill_md = _search
-        mod.fetch_remote_skill_md = lambda _u, _b, _s, timeout=15: (skill_text, None)
-        mod.fetch_remote_sha = lambda _u, _b: (_ for _ in ()).throw(
-            AssertionError("Code Search evidence must not resolve SHA or claim")
-        )
-
-        payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
-
-        self.assertEqual(payload["summary"]["auto_claimed"], 0)
-        self.assertEqual(payload["summary"]["needs_review"], 1)
-        self.assertIn(("karpathy-guidelines", 20), calls)
-        self.assertIn(("Karpathy Guidelines", 20), calls)
-        self.assertGreater(len(calls), 1)
-
-    def test_search_limits_queries_results_and_verified_candidates(self) -> None:
-        skill_text = (
-            "---\nname: budgeted-skill\n"
-            "description: Description with enough distinctive words to trigger several search queries during audit.\n"
-            "---\n\n# Budgeted Skill\n\n"
-            "Another distinctive sentence with enough words for a body query.\n"
-        )
-        sd = self.write_skill("budgeted-skill")
-        (sd / "SKILL.md").write_text(skill_text, encoding="utf-8")
-        self.write_sources({})
-
-        mod = self._load_audit_module()
-        mod.KNOWN_UPSTREAMS[:] = []
-        mod.gh_search.gh_available = lambda: True
-        calls = []
-
-        def _search(query, max_results=50):
-            calls.append((query, max_results))
-            return ([{
-                "owner": f"owner{len(calls)}",
-                "repo": f"repo{i}",
-                "branch": "main",
-                "subpath": f"copies/{len(calls)}/{i}",
-                "path": f"copies/{len(calls)}/{i}/SKILL.md",
-            } for i in range(25)], None)
-
-        fetched = []
-        mod.gh_search.search_skill_md = _search
-        mod.fetch_remote_skill_md = lambda _u, _b, subpath, timeout=15: (
-            fetched.append(subpath) or f"not the same {subpath}", None
-        )
-        mod.fetch_remote_sha = lambda _u, _b: (_ for _ in ()).throw(
-            AssertionError("low-confidence candidates must not resolve SHA")
-        )
-
-        payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
-
-        rep = next(r for r in payload["reports"] if r["name"] == "budgeted-skill")
-        self.assertEqual(len(calls), 3)
-        self.assertTrue(all(max_results == 20 for _query, max_results in calls))
-        self.assertEqual(len(fetched), 40)
-        self.assertEqual(rep["verified_candidate_count"], 40)
-        self.assertEqual(rep["skipped_candidate_count"], 35)
-        self.assertEqual(rep["search_verify_budget"], 40)
-        self.assertEqual(len(rep["search_queries"]), 3)
-        self.assertEqual(len(rep["result_count_by_query"]), 3)
-        self.assertIn("elapsed_ms", rep)
-
-    def test_search_exact_strong_path_needs_review_without_sha(self) -> None:
-        skill_text = "---\nname: winner\ndescription: enough words for searching this exact skill source.\n---\n\n# Winner\n"
-        sd = self.write_skill("winner")
-        (sd / "SKILL.md").write_text(skill_text, encoding="utf-8")
-        self.write_sources({})
-
-        mod = self._load_audit_module()
-        mod.KNOWN_UPSTREAMS[:] = []
-        mod.gh_search.gh_available = lambda: True
-        calls = []
-
-        def _search(query, max_results=50):
-            calls.append(query)
-            if len(calls) > 1:
-                return ([], None)
-            return ([
-                {"owner": "mirror", "repo": "dotfiles", "branch": "main",
-                 "subpath": ".agents/skills/winner", "path": ".agents/skills/winner/SKILL.md"},
-                {"owner": "source", "repo": "skills", "branch": "main",
-                 "subpath": "skills/winner", "path": "skills/winner/SKILL.md"},
-                {"owner": "mirror2", "repo": "registry", "branch": "main",
-                 "subpath": "registry/winner", "path": "registry/winner/SKILL.md"},
-            ], None)
-
-        fetched = []
-        mod.gh_search.search_skill_md = _search
-        mod.fetch_remote_skill_md = lambda _u, _b, subpath, timeout=15: (
-            fetched.append(subpath) or skill_text, None
-        )
-        mod.fetch_remote_sha = lambda _u, _b: (_ for _ in ()).throw(
-            AssertionError("Code Search strong exact match must still not resolve SHA")
-        )
-
-        payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
-
-        rep = next(r for r in payload["reports"] if r["name"] == "winner")
-        self.assertEqual(rep["decision"], "needs_review")
-        self.assertIsNone(rep["claim_record"])
-        self.assertEqual(fetched, ["skills/winner"])
-        self.assertEqual(rep["verified_candidate_count"], 1)
-        self.assertGreater(rep["skipped_candidate_count"], 0)
-        self.assertEqual(rep["candidates"][0]["url"], "https://github.com/source/skills")
-        self.assertTrue(rep["candidates"][0]["search_path_strong"])
-
-    def test_search_multiple_weak_exact_matches_need_review_without_sha(self) -> None:
-        skill_text = "---\nname: copied\ndescription: enough words for searching copied exact matches.\n---\n\n# Copied\n"
-        sd = self.write_skill("copied")
-        (sd / "SKILL.md").write_text(skill_text, encoding="utf-8")
-        self.write_sources({})
-
-        mod = self._load_audit_module()
-        mod.KNOWN_UPSTREAMS[:] = []
-        mod.gh_search.gh_available = lambda: True
-        mod.gh_search.search_skill_md = lambda _query, max_results=50: ([
-            {"owner": "mirror", "repo": "dotfiles", "branch": "main",
-             "subpath": ".agents/skills/copied", "path": ".agents/skills/copied/SKILL.md"},
-            {"owner": "copy", "repo": "registry", "branch": "main",
-             "subpath": "marketplace/copied", "path": "marketplace/copied/SKILL.md"},
-        ], None)
-        mod.fetch_remote_skill_md = lambda _u, _b, _s, timeout=15: (skill_text, None)
-        mod.fetch_remote_sha = lambda _u, _b: (_ for _ in ()).throw(
-            AssertionError("weak Code Search matches must not resolve SHA")
-        )
-
-        payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
-
-        rep = next(r for r in payload["reports"] if r["name"] == "copied")
-        self.assertEqual(rep["decision"], "needs_review")
-        self.assertIsNone(rep["claim_record"])
-        self.assertEqual(payload["summary"]["auto_claimed"], 0)
-        sources = json.loads((self.manager / "sources.json").read_text(encoding="utf-8"))
-        self.assertNotIn("copied", sources["skills"])
-
-    def test_search_skipped_when_gh_unavailable(self) -> None:
-        sd = self.write_skill("alone-skill", "totally homemade thing here only mine.")
-        self.write_sources({})
-
-        mod = self._load_audit_module()
-        mod.KNOWN_UPSTREAMS[:] = []
-        mod.gh_search.gh_available = lambda: False
-
-        def _should_not_call(*_a, **_k):
-            raise AssertionError("search_skill_md must not be called when gh is unavailable")
-
-        mod.gh_search.search_skill_md = _should_not_call
-
-        payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
-
-        self.assertFalse(payload["summary"]["search_used"])
-        self.assertIn("gh", payload["summary"]["search_disabled_reason"])
-        self.assertEqual(payload["summary"]["no_match"], 1)
-
-    def test_search_circuit_breaker_trips_after_repeated_failures(self) -> None:
-        for n in range(5):
-            sd = self.write_skill(
-                f"failing-skill-{n}",
-                "Description with enough distinctive words to trigger a search query lookup."
-            )
-        self.write_sources({})
-
-        mod = self._load_audit_module()
-        mod.KNOWN_UPSTREAMS[:] = []
-        mod.gh_search.gh_available = lambda: True
-        call_count = {"n": 0}
-
-        def _failing_search(_phrase, max_results=3):
-            call_count["n"] += 1
-            return ([], "API rate limit exceeded")
-
-        mod.gh_search.search_skill_md = _failing_search
-
-        payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
-
-        self.assertEqual(call_count["n"], mod.SEARCH_FAILURE_BUDGET)
-        self.assertEqual(payload["summary"]["search_failures"], mod.SEARCH_FAILURE_BUDGET)
-        self.assertIn("mid-run", payload["summary"]["search_disabled_reason"] or "")
-        self.assertEqual(payload["summary"]["auto_claimed"], 0)
+        self.assertFalse(any(key.startswith("search_") for key in payload["summary"]))
+        rep = next(r for r in payload["reports"] if r["name"] == "websearch-needed")
+        self.assertEqual(rep["decision"], "no_match")
+        self.assertEqual(rep["method"], "whitelist")
+        self.assertIsInstance(rep.get("search_query_hint"), str)
 
     def test_derive_whitelist_additions_ignores_search_evidence(self) -> None:
         mod = self._load_audit_module()
@@ -1215,7 +932,6 @@ class AuditWithSearchTests(SkillManagerContractTests):
 
         mod = self._load_audit_module()
         mod.KNOWN_UPSTREAMS[:] = []
-        mod.gh_search.gh_available = lambda: False
 
         payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
 
@@ -1232,7 +948,6 @@ class AuditWithSearchTests(SkillManagerContractTests):
 
         mod = self._load_audit_module()
         mod.KNOWN_UPSTREAMS[:] = []
-        mod.gh_search.gh_available = lambda: False
 
         payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
 
@@ -1262,57 +977,6 @@ class AuditWithSearchTests(SkillManagerContractTests):
         rep = next(r for r in payload["reports"] if r["name"] == "git-skill")
         self.assertEqual(rep["decision"], "auto_claim")
         self.assertNotIn("search_query_hint", rep)
-
-    def test_search_does_not_append_to_whitelist_json(self) -> None:
-        skill_text_a = (
-            "---\nname: alpha\n"
-            "description: A long enough description that we can extract distinctive search words from it without trouble at all.\n"
-            "---\n\n# Body\n"
-        )
-        skill_text_b = (
-            "---\nname: beta\n"
-            "description: Another long description with plenty of distinctive lookup keywords waiting to be picked up.\n"
-            "---\n\n# Body\n"
-        )
-        sd_a = self.write_skill("alpha")
-        (sd_a / "SKILL.md").write_text(skill_text_a, encoding="utf-8")
-        sd_b = self.write_skill("beta")
-        (sd_b / "SKILL.md").write_text(skill_text_b, encoding="utf-8")
-        self.write_sources({})
-
-        mod = self._load_audit_module()
-        mod.KNOWN_UPSTREAMS[:] = []
-        mod.gh_search.gh_available = lambda: True
-
-        def _search(phrase, max_results=3):
-            if "alpha" in phrase or "Body" in phrase or True:
-                # Return based on which skill we're searching for via current cwd context;
-                # easier: inspect the phrase. Both descriptions are unique enough.
-                if "Another" in phrase or "plenty" in phrase or "lookup" in phrase or "keywords" in phrase:
-                    return ([{"owner": "alice", "repo": "kit", "branch": "main",
-                              "subpath": "skills/beta", "path": "skills/beta/SKILL.md"}], None)
-                return ([{"owner": "alice", "repo": "kit", "branch": "main",
-                          "subpath": "skills/alpha", "path": "skills/alpha/SKILL.md"}], None)
-            return ([], None)
-
-        mod.gh_search.search_skill_md = _search
-
-        def _fetch_raw(_url, _branch, subpath, timeout=15):
-            if subpath.endswith("alpha"):
-                return (skill_text_a, None)
-            return (skill_text_b, None)
-
-        mod.fetch_remote_skill_md = _fetch_raw
-        mod.fetch_remote_sha = lambda _u, _b: (_ for _ in ()).throw(
-            AssertionError("Code Search must not resolve SHA or claim")
-        )
-
-        payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
-
-        self.assertEqual(payload["summary"]["auto_claimed"], 0)
-        self.assertEqual(payload["summary"]["needs_review"], 2)
-        self.assertEqual(payload["summary"]["whitelist_appended"], [])
-        self.assertFalse((self.manager / "whitelist.json").exists())
 
 
 if __name__ == "__main__":

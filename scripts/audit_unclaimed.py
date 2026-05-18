@@ -1,7 +1,7 @@
 """Audit unclaimed sibling skills and collect source evidence.
 
 Usage:
-    python audit_unclaimed.py            # auto-claim trusted/explicit matches; collect search evidence
+    python audit_unclaimed.py            # auto-claim trusted/explicit matches; emit WebSearch hints
     python audit_unclaimed.py --dry-run  # report only, do not modify sources.json
 
 Per-skill flow (ordered gates, stop at first verified match):
@@ -12,25 +12,19 @@ Per-skill flow (ordered gates, stop at first verified match):
     3. Whitelist lookup: try each entry in KNOWN_UPSTREAMS + whitelist.json.
        For each candidate, fetch upstream SKILL.md via raw.githubusercontent.com
        and run difflib similarity vs. the local SKILL.md.
-    4. GitHub Code Search (only if `gh` CLI is available and authenticated):
-       extract a distinctive phrase from the SKILL.md description, search for
-       other SKILL.md files containing it, then verify each candidate via the
-       same raw + similarity flow. Search results are evidence-only: Code
-       Search finds copies, not origins, so it never auto-claims. A circuit
-       breaker disables this gate after repeated API failures so a single
-       network outage doesn't slow audits.
+    4. WebSearch (agent side): unresolved skills include a distinctive
+       `search_query_hint` so the agent can search the web and judge source
+       identity from repository/page context.
 
 Confidence rules (from similarity.py):
     - "high" in trusted/explicit gates -> auto-claim; installed_revision is set
       only on exact content match.
-    - "high" in Code Search -> needs_review with evidence.
-    - "mid"   -> needs_review, surface candidates to the user.
     - "low" / no candidates -> no_match (likely user-authored or unknown).
 
 We deliberately do NOT auto claim-local on no_match; the user decides.
 
-Whitelist entries are trusted source templates confirmed outside global Code
-Search. The script does not auto-grow whitelist from search evidence.
+Whitelist entries are trusted source templates confirmed outside automated
+open-world search. The script does not auto-grow whitelist from search evidence.
 
 Finally (when NOT --dry-run), runs `inventory.scan(check_remote=True)` once
 and attaches the result as `inventory_after` so callers see the updated
@@ -39,7 +33,6 @@ landscape in a single command — no separate inventory.py invocation needed.
 Output (stdout, JSON):
     {
       "summary": { "total_unclaimed": N, "auto_claimed": K, ..., "dry_run": false,
-                   "search_used": bool, "search_disabled_reason": str | null,
                    "whitelist_appended": [ {url, branch, subpath_template}, ... ] },
       "reports": [ {per-skill report}, ... ],
       "inventory_after": [ {inventory entry}, ... ] | null
@@ -47,9 +40,7 @@ Output (stdout, JSON):
 
 Per-skill reports with `decision in {needs_review, no_match}` also include a
 `search_query_hint` field (string or null). When the script cannot resolve a
-skill on its own (e.g. `gh` CLI unavailable, or upstream not on GitHub),
-callers can feed this phrase into an agent-driven WebSearch as a fallback —
-useful precisely when the in-script Code Search gate couldn't run.
+skill on its own, callers can feed this phrase into agent-driven WebSearch.
 
 Exit codes:
     0  finished (regardless of how many auto-claims happened)
@@ -63,7 +54,6 @@ import configparser
 import json
 import re
 import sys
-import time
 from pathlib import Path
 
 from _common import (
@@ -79,7 +69,6 @@ from _common import (
 )
 from check_remote import fetch_remote_sha
 from similarity import classify, first_n_lines, normalize, ratio
-import gh_search
 import inventory
 
 
@@ -90,12 +79,6 @@ KNOWN_UPSTREAMS: list[dict] = [
         "subpath_template": "skills/{name}",
     },
 ]
-
-SEARCH_FAILURE_BUDGET = 3
-SEARCH_QUERY_LIMIT = 3
-SEARCH_RESULTS_PER_QUERY = 20
-SEARCH_VERIFY_BUDGET = 40
-
 
 def whitelist_path() -> Path:
     return skills_manager_root() / "whitelist.json"
@@ -393,220 +376,29 @@ def audit_via_whitelist(name: str, local_text: str, local_head: str,
     return report
 
 
-def _search_candidate_key(item: dict) -> tuple[str, str, str]:
-    return (
-        f"https://github.com/{item['owner']}/{item['repo']}",
-        item["branch"],
-        item["subpath"],
-    )
-
-
-def _is_strong_search_path(name: str, path: str) -> bool:
-    return path.replace("\\", "/").lower() == f"skills/{name.lower()}/skill.md"
-
-
-def _search_candidate_sort_key(name: str, item: dict) -> tuple[int, str, str]:
-    path = (item.get("path") or "").replace("\\", "/").lower()
-    repo = f"{item.get('owner', '')}/{item.get('repo', '')}".lower()
-    score = 100
-    if _is_strong_search_path(name, path):
-        score -= 100
-    elif path.endswith(f"/{name.lower()}/skill.md"):
-        score -= 40
-    if name.lower().replace("-", "") in repo.replace("-", ""):
-        score -= 10
-    noisy_markers = (
-        ".agents/skills",
-        ".claude/skills",
-        ".codex/skills",
-        "dotfiles",
-        "marketplace",
-        "mirror",
-        "registry",
-    )
-    if any(marker in path or marker in repo for marker in noisy_markers):
-        score += 60
-    if path.endswith(".bak") or "/translations/" in path or "/translated/" in path:
-        score += 30
-    return score, repo, path
-
-
-def _candidate_from_search_item(item: dict) -> dict:
-    return {
-        "url": f"https://github.com/{item['owner']}/{item['repo']}",
-        "branch": item["branch"],
-        "subpath": item["subpath"],
-    }
-
-
-def _search_candidate_likelihood(name: str, item: dict) -> tuple[str, str]:
-    path = (item.get("path") or "").replace("\\", "/").lower()
-    repo = f"{item.get('owner', '')}/{item.get('repo', '')}".lower()
-    if _is_strong_search_path(name, path):
-        return "possible_source", "standard skills/<name>/SKILL.md path"
-    noisy_markers = (
-        ".agents/skills",
-        ".claude/skills",
-        ".codex/skills",
-        "dotfiles",
-        "marketplace",
-        "mirror",
-        "registry",
-        "awesome",
-    )
-    if any(marker in path or marker in repo for marker in noisy_markers):
-        return "mirror", "path or repository looks like a copied skill collection"
-    if path.endswith(f"/{name.lower()}/skill.md"):
-        return "possible_source", "path ends with <name>/SKILL.md"
-    return "unknown", "similar content found by global Code Search"
-
-
-def audit_via_search(name: str, skill_dir: Path, local_text: str, local_head: str,
-                      breaker: dict) -> dict:
-    """Third gate: GitHub Code Search. Mutates breaker on failure."""
-    started = time.monotonic()
-    report: dict = {
-        "method": "search",
-        "decision": "no_match",
-        "candidates": [],
-        "claim_record": None,
-        "error": None,
-        "search_queries": [],
-        "result_count_by_query": {},
-        "verified_candidate_count": 0,
-        "skipped_candidate_count": 0,
-        "search_verify_budget": SEARCH_VERIFY_BUDGET,
-        "elapsed_ms": 0,
-    }
-
-    queries = search_queries_for(name, skill_dir)[:SEARCH_QUERY_LIMIT]
-    report["search_queries"] = queries
-    if not queries:
-        report["error"] = "no useful search query could be built"
-        report["elapsed_ms"] = round((time.monotonic() - started) * 1000)
-        return report
-
-    all_items: list[dict] = []
-    seen_candidates: set[tuple[str, str, str]] = set()
-    overflow_skipped = 0
-    for query in queries:
-        items, err = gh_search.search_skill_md(query, max_results=SEARCH_RESULTS_PER_QUERY)
-        report["result_count_by_query"][query] = len(items)
-        if err:
-            breaker["failures"] += 1
-            report["error"] = err
-            report["elapsed_ms"] = round((time.monotonic() - started) * 1000)
-            return report
-        if len(items) > SEARCH_RESULTS_PER_QUERY:
-            overflow_skipped += len(items) - SEARCH_RESULTS_PER_QUERY
-        for item in items[:SEARCH_RESULTS_PER_QUERY]:
-            key = _search_candidate_key(item)
-            if key in seen_candidates:
-                continue
-            seen_candidates.add(key)
-            all_items.append(item)
-
-    all_items.sort(key=lambda item: _search_candidate_sort_key(name, item))
-
-    has_mid = False
-    high_seen = False
-    verified = 0
-    for item in all_items[:SEARCH_VERIFY_BUDGET]:
-        cand_input = _candidate_from_search_item(item)
-        print(
-            f"audit search: {name} verifying {verified + 1}/{SEARCH_VERIFY_BUDGET} "
-            f"{cand_input['url']} {cand_input['subpath']}",
-            file=sys.stderr,
-        )
-        enriched, _record = _verify_and_build_claim(
-            local_text, local_head, cand_input, "search", resolve_revision=False
-        )
-        verified += 1
-        enriched["upstream_path"] = item.get("path", "")
-        enriched["search_path_strong"] = _is_strong_search_path(name, enriched["upstream_path"])
-        enriched["exact_match"] = (
-            enriched.get("full_ratio") == 1.0 and enriched.get("head_ratio") == 1.0
-        )
-        likelihood, why = _search_candidate_likelihood(name, item)
-        enriched["source_likelihood"] = likelihood
-        enriched["why"] = why
-        report["candidates"].append(enriched)
-        if enriched.get("confidence") == "high":
-            high_seen = True
-            if enriched["search_path_strong"] and enriched["exact_match"]:
-                break
-        elif enriched.get("confidence") == "mid":
-            has_mid = True
-
-    report["verified_candidate_count"] = verified
-    report["skipped_candidate_count"] = max(0, len(all_items) - verified) + overflow_skipped
-
-    if high_seen or has_mid:
-        report["decision"] = "needs_review"
-        report["reason"] = "Code Search found similar files; source identity requires agent review"
-
-    report["elapsed_ms"] = round((time.monotonic() - started) * 1000)
-    return report
-
-
 def query_hint_for(skill_dir: Path) -> str | None:
-    """Build a phrase suitable for an agent-driven WebSearch fallback.
-
-    Used to populate `search_query_hint` on no_match / needs_review reports so
-    callers without `gh` CLI can still get a useful starting query (e.g.
-    feed it into the agent's WebSearch tool).
-    """
+    """Build a phrase suitable for agent-driven WebSearch."""
     md = skill_dir / "SKILL.md"
     if not md.is_file():
         md = skill_dir / "skill.md"
     if not md.is_file():
         return None
     fm = parse_frontmatter(md.read_text(encoding="utf-8", errors="replace"))
-    return gh_search.extract_query_phrase(fm.get("description", ""))
+    return extract_query_phrase(fm.get("description", ""))
 
 
-def search_queries_for(name: str, skill_dir: Path) -> list[str]:
-    """Build a small ordered set of GitHub Code Search queries."""
-    md = skill_dir / "SKILL.md"
-    if not md.is_file():
-        md = skill_dir / "skill.md"
-    if not md.is_file():
-        return [name]
-
-    text = md.read_text(encoding="utf-8", errors="replace")
-    fm = parse_frontmatter(text)
-    queries: list[str] = [name]
-
-    for line in text.splitlines():
-        m = re.match(r"^#\s+(.+?)\s*$", line)
-        if m:
-            queries.append(m.group(1))
-            break
-
-    desc_phrase = gh_search.extract_query_phrase(fm.get("description", ""))
-    if desc_phrase:
-        queries.append(desc_phrase)
-
-    for sentence in re.split(r"(?<=[.!?])\s+", text):
-        phrase = gh_search.extract_query_phrase(sentence, min_words=6, max_words=12)
-        if phrase:
-            queries.append(phrase)
-            break
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for q in queries:
-        normalized = q.strip()
-        key = normalized.lower()
-        if not normalized or key in seen:
-            continue
-        seen.add(key)
-        deduped.append(normalized)
-    return deduped[:5]
+def extract_query_phrase(description: str, min_words: int = 8, max_words: int = 12) -> str | None:
+    """Pick a contiguous span of original words from a description."""
+    if not description:
+        return None
+    cleaned = re.sub(r"\s+", " ", description).strip()
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9'\-]*", cleaned)
+    if len(tokens) < min_words:
+        return None
+    return " ".join(tokens[:max_words])
 
 
-def audit_one(name: str, skill_dir: Path, upstreams: list[dict],
-                search_enabled: bool, breaker: dict) -> dict:
+def audit_one(name: str, skill_dir: Path, upstreams: list[dict]) -> dict:
     """Returns a per-skill report dict."""
     git_report = audit_via_git_dir(skill_dir)
     if git_report is not None:
@@ -632,34 +424,7 @@ def audit_one(name: str, skill_dir: Path, upstreams: list[dict],
     if wl_report["decision"] == "auto_claim":
         return {"name": name, **wl_report}
 
-    if not search_enabled or breaker["failures"] >= SEARCH_FAILURE_BUDGET:
-        wl_report["candidates"] = [*embedded_report["candidates"], *wl_report["candidates"]]
-        return {"name": name, **wl_report}
-
-    search_report = audit_via_search(name, skill_dir, local_text, local_head, breaker)
-    if not embedded_report["candidates"] and not wl_report["candidates"]:
-        return {"name": name, **search_report}
-
-    if search_report["decision"] == "needs_review" or wl_report["decision"] == "needs_review":
-        wl_report["decision"] = "needs_review"
-    wl_report["candidates"] = [
-        *embedded_report["candidates"],
-        *wl_report["candidates"],
-        *search_report["candidates"],
-    ]
-    for key in (
-        "search_queries",
-        "result_count_by_query",
-        "verified_candidate_count",
-        "skipped_candidate_count",
-        "search_verify_budget",
-        "elapsed_ms",
-        "reason",
-    ):
-        if key in search_report:
-            wl_report[key] = search_report[key]
-    if search_report.get("error"):
-        wl_report["error"] = wl_report.get("error") or search_report["error"]
+    wl_report["candidates"] = [*embedded_report["candidates"], *wl_report["candidates"]]
     return {"name": name, **wl_report}
 
 
@@ -673,13 +438,6 @@ def run_audit(dry_run: bool = False) -> dict:
     self_name = skills_manager_root().name
     upstreams = merged_upstreams()
 
-    search_disabled_reason: str | None = None
-    if not gh_search.gh_available():
-        search_disabled_reason = "gh CLI not available or not authenticated"
-    search_enabled = search_disabled_reason is None
-
-    breaker = {"failures": 0}
-
     reports: list[dict] = []
     auto_claimed_now: list[str] = []
     for child in sorted(skills_root().iterdir()):
@@ -690,7 +448,7 @@ def run_audit(dry_run: bool = False) -> dict:
         if child.name in data["skills"]:
             continue
 
-        rep = audit_one(child.name, child, upstreams, search_enabled, breaker)
+        rep = audit_one(child.name, child, upstreams)
         if rep["decision"] in ("needs_review", "no_match"):
             rep["search_query_hint"] = query_hint_for(child)
         reports.append(rep)
@@ -705,9 +463,6 @@ def run_audit(dry_run: bool = False) -> dict:
     whitelist_additions = derive_whitelist_additions(reports, [*KNOWN_UPSTREAMS, *existing_whitelist])
     if whitelist_additions and not dry_run:
         save_whitelist([*existing_whitelist, *whitelist_additions])
-
-    if breaker["failures"] >= SEARCH_FAILURE_BUDGET and search_disabled_reason is None:
-        search_disabled_reason = f"search disabled mid-run after {breaker['failures']} consecutive failures"
 
     # After-audit inventory: reflect the new state to the user in a single call.
     # Skipped in --dry-run because sources.json wasn't touched, so inventory
@@ -725,9 +480,6 @@ def run_audit(dry_run: bool = False) -> dict:
             1 for r in reports if r["decision"] == "git_remote_unsupported"
         ),
         "dry_run": dry_run,
-        "search_used": search_enabled,
-        "search_disabled_reason": search_disabled_reason,
-        "search_failures": breaker["failures"],
         "whitelist_appended": whitelist_additions,
     }
     return {

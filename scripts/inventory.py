@@ -131,9 +131,6 @@ def audit_metadata(payload: dict) -> dict:
         "needs_review": summary.get("needs_review", 0),
         "no_match": summary.get("no_match", 0),
         "git_remote_unsupported": summary.get("git_remote_unsupported", 0),
-        "search_used": summary.get("search_used", False),
-        "search_disabled_reason": summary.get("search_disabled_reason"),
-        "search_failures": summary.get("search_failures", 0),
         "whitelist_appended": summary.get("whitelist_appended", []),
         "reports": payload.get("reports", []),
     }
