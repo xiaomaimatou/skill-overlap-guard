@@ -392,39 +392,40 @@ def audit_via_search(name: str, skill_dir: Path, local_text: str, local_head: st
         "error": None,
     }
 
-    description = ""
-    md_path = skill_dir / "SKILL.md"
-    if md_path.is_file():
-        fm = parse_frontmatter(md_path.read_text(encoding="utf-8", errors="replace"))
-        description = fm.get("description", "")
-    phrase = gh_search.extract_query_phrase(description)
-    if not phrase:
-        report["error"] = "description too short / generic for a search phrase"
-        return report
-
-    items, err = gh_search.search_skill_md(phrase)
-    if err:
-        breaker["failures"] += 1
-        report["error"] = err
+    queries = search_queries_for(name, skill_dir)
+    if not queries:
+        report["error"] = "no useful search query could be built"
         return report
 
     best_high_record: dict | None = None
     best_high_full: float = -1.0
     has_mid = False
-    for item in items:
-        cand_input = {
-            "url": f"https://github.com/{item['owner']}/{item['repo']}",
-            "branch": item["branch"],
-            "subpath": item["subpath"],
-        }
-        enriched, record = _verify_and_build_claim(local_text, local_head, cand_input, "search")
-        enriched["upstream_path"] = item.get("path", "")
-        report["candidates"].append(enriched)
-        if record is not None and enriched.get("full_ratio", 0) > best_high_full:
-            best_high_record = record
-            best_high_full = enriched["full_ratio"]
-        elif enriched.get("confidence") == "mid":
-            has_mid = True
+    seen_candidates: set[tuple[str, str, str]] = set()
+    for query in queries:
+        items, err = gh_search.search_skill_md(query, max_results=50)
+        if err:
+            breaker["failures"] += 1
+            report["error"] = err
+            return report
+        for item in items:
+            cand_input = {
+                "url": f"https://github.com/{item['owner']}/{item['repo']}",
+                "branch": item["branch"],
+                "subpath": item["subpath"],
+            }
+            key = (cand_input["url"], cand_input["branch"], cand_input["subpath"])
+            if key in seen_candidates:
+                continue
+            seen_candidates.add(key)
+            enriched, record = _verify_and_build_claim(local_text, local_head, cand_input, "search")
+            enriched["upstream_path"] = item.get("path", "")
+            enriched["search_query"] = query
+            report["candidates"].append(enriched)
+            if record is not None and enriched.get("full_ratio", 0) > best_high_full:
+                best_high_record = record
+                best_high_full = enriched["full_ratio"]
+            elif enriched.get("confidence") == "mid":
+                has_mid = True
 
     if best_high_record is not None:
         report["decision"] = "auto_claim"
@@ -449,6 +450,46 @@ def query_hint_for(skill_dir: Path) -> str | None:
         return None
     fm = parse_frontmatter(md.read_text(encoding="utf-8", errors="replace"))
     return gh_search.extract_query_phrase(fm.get("description", ""))
+
+
+def search_queries_for(name: str, skill_dir: Path) -> list[str]:
+    """Build a small ordered set of GitHub Code Search queries."""
+    md = skill_dir / "SKILL.md"
+    if not md.is_file():
+        md = skill_dir / "skill.md"
+    if not md.is_file():
+        return [name]
+
+    text = md.read_text(encoding="utf-8", errors="replace")
+    fm = parse_frontmatter(text)
+    queries: list[str] = [name]
+
+    for line in text.splitlines():
+        m = re.match(r"^#\s+(.+?)\s*$", line)
+        if m:
+            queries.append(m.group(1))
+            break
+
+    desc_phrase = gh_search.extract_query_phrase(fm.get("description", ""))
+    if desc_phrase:
+        queries.append(desc_phrase)
+
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        phrase = gh_search.extract_query_phrase(sentence, min_words=6, max_words=12)
+        if phrase:
+            queries.append(phrase)
+            break
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for q in queries:
+        normalized = q.strip()
+        key = normalized.lower()
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+    return deduped[:5]
 
 
 def audit_one(name: str, skill_dir: Path, upstreams: list[dict],

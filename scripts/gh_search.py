@@ -6,7 +6,7 @@ fails to identify a skill, search GitHub for a matching SKILL.md.
 Public surface:
     gh_available() -> bool
     extract_query_phrase(description: str) -> str | None
-    search_skill_md(phrase: str, max_results: int = 3) -> tuple[list[Candidate], str | None]
+    search_skill_md(phrase: str, max_results: int = 50) -> tuple[list[Candidate], str | None]
 
 A `Candidate` is a dict: {"owner", "repo", "branch", "subpath"}.
 
@@ -19,14 +19,6 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-
-# Words too short / too common to be useful in a phrase search.
-_STOPWORDS = frozenset({
-    "the", "a", "an", "and", "or", "but", "if", "then", "this", "that",
-    "is", "are", "was", "were", "be", "been", "being", "to", "of", "in",
-    "on", "at", "for", "from", "by", "with", "as", "it", "its", "into",
-    "use", "used", "using", "when", "you", "your", "via", "without",
-})
 
 
 def gh_available() -> bool:
@@ -42,6 +34,8 @@ def gh_available() -> bool:
             ["gh", "auth", "status"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             check=False,
         )
@@ -51,12 +45,7 @@ def gh_available() -> bool:
 
 
 def extract_query_phrase(description: str, min_words: int = 8, max_words: int = 12) -> str | None:
-    """Pick a distinctive contiguous span of words from a description.
-
-    Strategy: walk the description left-to-right, keep the first window of
-    `min_words..max_words` consecutive non-stopword tokens. Returns None if
-    the description is too short / too generic to produce one.
-    """
+    """Pick a contiguous span of original words from a description."""
     if not description:
         return None
     cleaned = re.sub(r"\s+", " ", description).strip()
@@ -64,40 +53,56 @@ def extract_query_phrase(description: str, min_words: int = 8, max_words: int = 
     if len(tokens) < min_words:
         return None
 
-    distinctive_tokens = [t for t in tokens if t.lower() not in _STOPWORDS and len(t) > 2]
-    if len(distinctive_tokens) < min_words:
-        distinctive_tokens = tokens
-
-    window = distinctive_tokens[:max_words]
-    if len(window) < min_words:
-        return None
-    return " ".join(window)
+    return " ".join(tokens[:max_words])
 
 
-def _gh_api_search(query: str, timeout: int = 20) -> tuple[dict | None, str | None]:
-    """Run `gh api search/code` and return parsed JSON or an error string."""
+def _gh_search_code(query: str, max_results: int, timeout: int = 20) -> tuple[list | None, str | None]:
+    """Run `gh search code` and return parsed JSON or an error string."""
     try:
         out = subprocess.run(
-            ["gh", "api", "-X", "GET", "search/code", "-f", f"q={query}"],
+            [
+                "gh", "search", "code", query,
+                "--filename", "SKILL.md",
+                "--json", "repository,path,url",
+                "--limit", str(max_results),
+            ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
         )
     except FileNotFoundError:
         return None, "gh CLI not found"
     except subprocess.TimeoutExpired:
-        return None, "gh api search/code timed out"
+        return None, "gh search code timed out"
     if out.returncode != 0:
         msg = (out.stderr.strip() or out.stdout.strip() or "unknown gh error")[:500]
-        return None, f"gh api error: {msg}"
+        return None, f"gh search code error: {msg}"
     try:
         return json.loads(out.stdout), None
     except json.JSONDecodeError as e:
-        return None, f"gh api returned non-json: {e}"
+        return None, f"gh search code returned non-json: {e}"
 
 
-def search_skill_md(phrase: str, max_results: int = 3) -> tuple[list[dict], str | None]:
+def _repo_full_name(repo: dict) -> str:
+    return (
+        repo.get("nameWithOwner")
+        or repo.get("fullName")
+        or repo.get("full_name")
+        or ""
+    )
+
+
+def _repo_default_branch(repo: dict) -> str:
+    ref = repo.get("defaultBranchRef")
+    if isinstance(ref, dict) and ref.get("name"):
+        return ref["name"]
+    return repo.get("default_branch") or repo.get("defaultBranch") or "main"
+
+
+def search_skill_md(phrase: str, max_results: int = 50) -> tuple[list[dict], str | None]:
     """Search GitHub for SKILL.md files containing the phrase.
 
     Returns (candidates, error). On success, `candidates` is a list of dicts:
@@ -105,19 +110,18 @@ def search_skill_md(phrase: str, max_results: int = 3) -> tuple[list[dict], str 
     `branch` falls back to "main" when the API doesn't expose default_branch
     inline (the caller can repair via ls-remote later).
     """
-    query = f'filename:SKILL.md "{phrase}"'
-    data, err = _gh_api_search(query)
+    data, err = _gh_search_code(phrase, max_results=max_results)
     if err:
         return [], err
-    items = (data or {}).get("items") or []
+    items = data or []
     out: list[dict] = []
     for item in items[:max_results]:
         repo = (item.get("repository") or {})
-        full_name = repo.get("full_name") or ""
+        full_name = _repo_full_name(repo)
         if "/" not in full_name:
             continue
         owner, repo_name = full_name.split("/", 1)
-        branch = repo.get("default_branch") or "main"
+        branch = _repo_default_branch(repo)
         path = item.get("path") or ""
         if not path.endswith("SKILL.md") and not path.endswith("skill.md"):
             continue

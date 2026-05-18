@@ -839,8 +839,56 @@ class GhSearchPhraseTests(unittest.TestCase):
         phrase = mod.extract_query_phrase(desc)
         self.assertIsNotNone(phrase)
         self.assertGreaterEqual(len(phrase.split()), 8)
-        # No leading stopword
-        self.assertNotIn(phrase.split()[0].lower(), {"the", "a", "an", "and"})
+        self.assertIn("installed skills in the current sibling directory", phrase)
+
+    def test_search_skill_md_uses_gh_search_code_with_utf8_and_limit(self) -> None:
+        mod = self._load_module()
+        calls = []
+
+        def _fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps([{
+                "repository": {"nameWithOwner": "alice/kit", "defaultBranchRef": {"name": "trunk"}},
+                "path": "skills/demo/SKILL.md",
+                "url": "https://github.com/alice/kit/blob/trunk/skills/demo/SKILL.md",
+            }]), stderr="")
+
+        original_run = mod.subprocess.run
+        mod.subprocess.run = _fake_run
+        try:
+            candidates, err = mod.search_skill_md("Karpathy Guidelines", max_results=50)
+        finally:
+            mod.subprocess.run = original_run
+
+        self.assertIsNone(err)
+        self.assertEqual(candidates[0]["owner"], "alice")
+        self.assertEqual(candidates[0]["repo"], "kit")
+        self.assertEqual(candidates[0]["branch"], "trunk")
+        self.assertEqual(candidates[0]["subpath"], "skills/demo")
+        args, kwargs = calls[0]
+        self.assertEqual(args[:3], ["gh", "search", "code"])
+        self.assertIn("--filename", args)
+        self.assertIn("--limit", args)
+        self.assertIn("50", args)
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        self.assertEqual(kwargs["errors"], "replace")
+
+    def test_gh_available_uses_utf8_decoding(self) -> None:
+        mod = self._load_module()
+        calls = []
+
+        def _fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="✓ Logged in")
+
+        original_run = mod.subprocess.run
+        mod.subprocess.run = _fake_run
+        try:
+            self.assertTrue(mod.gh_available())
+        finally:
+            mod.subprocess.run = original_run
+        self.assertEqual(calls[0][1]["encoding"], "utf-8")
+        self.assertEqual(calls[0][1]["errors"], "replace")
 
     def test_returns_none_for_short_description(self) -> None:
         mod = self._load_module()
@@ -913,6 +961,45 @@ class AuditWithSearchTests(SkillManagerContractTests):
         self.assertEqual(payload["summary"]["auto_claimed"], 1)
         self.assertTrue(payload["summary"]["search_used"])
         self.assertEqual(payload["reports"][0]["method"], "search")
+
+    def test_search_tries_multiple_queries_and_larger_result_sets(self) -> None:
+        skill_text = (
+            "---\nname: karpathy-guidelines\n"
+            "description: Behavioral guidelines to reduce common LLM coding mistakes when writing, reviewing, or refactoring code.\n"
+            "---\n\n# Karpathy Guidelines\n\n"
+            "Derived from Andrej Karpathy's observations about common coding mistakes.\n"
+        )
+        sd = self.write_skill("karpathy-guidelines")
+        (sd / "SKILL.md").write_text(skill_text, encoding="utf-8")
+        self.write_sources({})
+
+        mod = self._load_audit_module()
+        mod.KNOWN_UPSTREAMS[:] = []
+        mod.gh_search.gh_available = lambda: True
+        calls = []
+
+        def _search(query, max_results=50):
+            calls.append((query, max_results))
+            if query == "Karpathy Guidelines":
+                return ([{
+                    "owner": "alice",
+                    "repo": "kit",
+                    "branch": "main",
+                    "subpath": "skills/karpathy-guidelines",
+                    "path": "skills/karpathy-guidelines/SKILL.md",
+                }], None)
+            return ([], None)
+
+        mod.gh_search.search_skill_md = _search
+        mod.fetch_remote_skill_md = lambda _u, _b, _s, timeout=15: (skill_text, None)
+        mod.fetch_remote_sha = lambda _u, _b: ("c0ffee" * 6, None)
+
+        payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
+
+        self.assertEqual(payload["summary"]["auto_claimed"], 1)
+        self.assertIn(("karpathy-guidelines", 50), calls)
+        self.assertIn(("Karpathy Guidelines", 50), calls)
+        self.assertGreater(len(calls), 1)
 
     def test_search_skipped_when_gh_unavailable(self) -> None:
         sd = self.write_skill("alone-skill", "totally homemade thing here only mine.")
