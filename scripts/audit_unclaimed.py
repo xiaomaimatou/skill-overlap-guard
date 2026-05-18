@@ -9,10 +9,7 @@ Per-skill flow (ordered gates, stop at first verified match):
        claim the skill as that repo at its current branch + revision (subpath="").
     2. Cheap, offline: scan local SKILL.md for github.com URLs, then verify any
        candidates through the same raw + similarity flow as other remote hints.
-    3. Whitelist lookup: try each entry in KNOWN_UPSTREAMS + whitelist.json.
-       For each candidate, fetch upstream SKILL.md via raw.githubusercontent.com
-       and run difflib similarity vs. the local SKILL.md.
-    4. WebSearch (agent side): unresolved skills include a distinctive
+    3. WebSearch (agent side): unresolved skills include a distinctive
        `search_query_hint` so the agent can search the web and judge source
        identity from repository/page context.
 
@@ -23,17 +20,13 @@ Confidence rules (from similarity.py):
 
 We deliberately do NOT auto claim-local on no_match; the user decides.
 
-Whitelist entries are trusted source templates confirmed outside automated
-open-world search. The script does not auto-grow whitelist from search evidence.
-
 Finally (when NOT --dry-run), runs `inventory.scan(check_remote=True)` once
 and attaches the result as `inventory_after` so callers see the updated
 landscape in a single command — no separate inventory.py invocation needed.
 
 Output (stdout, JSON):
     {
-      "summary": { "total_unclaimed": N, "auto_claimed": K, ..., "dry_run": false,
-                   "whitelist_appended": [ {url, branch, subpath_template}, ... ] },
+      "summary": { "total_unclaimed": N, "auto_claimed": K, ..., "dry_run": false },
       "reports": [ {per-skill report}, ... ],
       "inventory_after": [ {inventory entry}, ... ] | null
     }
@@ -51,7 +44,6 @@ from __future__ import annotations
 
 import argparse
 import configparser
-import json
 import re
 import sys
 from pathlib import Path
@@ -65,57 +57,10 @@ from _common import (
     save_sources,
     skills_manager_root,
     skills_root,
-    split_owner_repo,
 )
 from check_remote import fetch_remote_sha
 from similarity import classify, first_n_lines, normalize, ratio
 import inventory
-
-
-KNOWN_UPSTREAMS: list[dict] = [
-    {
-        "url": "https://github.com/obra/superpowers",
-        "branch": "main",
-        "subpath_template": "skills/{name}",
-    },
-]
-
-def whitelist_path() -> Path:
-    return skills_manager_root() / "whitelist.json"
-
-
-def load_whitelist() -> list[dict]:
-    """Load dynamically-learned whitelist entries. Tolerates a missing file."""
-    p = whitelist_path()
-    if not p.exists():
-        return []
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
-    entries = data.get("entries") if isinstance(data, dict) else data
-    return [e for e in (entries or []) if isinstance(e, dict)]
-
-
-def save_whitelist(entries: list[dict]) -> None:
-    p = whitelist_path()
-    tmp = p.with_suffix(".json.tmp")
-    payload = {"version": 1, "entries": entries}
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    tmp.replace(p)
-
-
-def merged_upstreams() -> list[dict]:
-    """KNOWN_UPSTREAMS + whitelist.json, deduped by (url, branch, template)."""
-    seen: set[tuple[str, str, str]] = set()
-    merged: list[dict] = []
-    for entry in [*KNOWN_UPSTREAMS, *load_whitelist()]:
-        key = (entry.get("url", ""), entry.get("branch", ""), entry.get("subpath_template", ""))
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(entry)
-    return merged
 
 
 def detect_git_remote(skill_dir: Path) -> str | None:
@@ -341,41 +286,6 @@ def audit_via_embedded_urls(skill_dir: Path, local_text: str, local_head: str) -
     return report
 
 
-def audit_via_whitelist(name: str, local_text: str, local_head: str,
-                         upstreams: list[dict]) -> dict:
-    """Try each upstream entry, fetch raw, score similarity."""
-    report: dict = {
-        "method": "whitelist",
-        "decision": "no_match",
-        "candidates": [],
-        "claim_record": None,
-        "error": None,
-    }
-
-    best_high_record: dict | None = None
-    best_high_full: float = -1.0
-    has_mid = False
-
-    for entry in upstreams:
-        sub = entry["subpath_template"].format(name=name)
-        cand_input = {"url": entry["url"], "branch": entry["branch"], "subpath": sub}
-        enriched, record = _verify_and_build_claim(local_text, local_head, cand_input, "whitelist")
-        report["candidates"].append(enriched)
-        if record is not None and enriched.get("full_ratio", 0) > best_high_full:
-            best_high_record = record
-            best_high_full = enriched["full_ratio"]
-        elif enriched.get("confidence") == "mid":
-            has_mid = True
-
-    if best_high_record is not None:
-        report["decision"] = "auto_claim"
-        report["claim_record"] = best_high_record
-    elif has_mid:
-        report["decision"] = "needs_review"
-
-    return report
-
-
 def query_hint_for(skill_dir: Path) -> str | None:
     """Build a phrase suitable for agent-driven WebSearch."""
     md = skill_dir / "SKILL.md"
@@ -398,7 +308,7 @@ def extract_query_phrase(description: str, min_words: int = 8, max_words: int = 
     return " ".join(tokens[:max_words])
 
 
-def audit_one(name: str, skill_dir: Path, upstreams: list[dict]) -> dict:
+def audit_one(name: str, skill_dir: Path) -> dict:
     """Returns a per-skill report dict."""
     git_report = audit_via_git_dir(skill_dir)
     if git_report is not None:
@@ -408,7 +318,7 @@ def audit_one(name: str, skill_dir: Path, upstreams: list[dict]) -> dict:
     if local is None:
         return {
             "name": name,
-            "method": "whitelist",
+            "method": "websearch",
             "decision": "no_match",
             "candidates": [],
             "claim_record": None,
@@ -420,23 +330,19 @@ def audit_one(name: str, skill_dir: Path, upstreams: list[dict]) -> dict:
     if embedded_report["decision"] in ("auto_claim", "needs_review"):
         return {"name": name, **embedded_report}
 
-    wl_report = audit_via_whitelist(name, local_text, local_head, upstreams)
-    if wl_report["decision"] == "auto_claim":
-        return {"name": name, **wl_report}
-
-    wl_report["candidates"] = [*embedded_report["candidates"], *wl_report["candidates"]]
-    return {"name": name, **wl_report}
-
-
-def derive_whitelist_additions(reports: list[dict], existing: list[dict]) -> list[dict]:
-    """Search evidence is not a trusted source; do not auto-grow whitelist."""
-    return []
+    return {
+        "name": name,
+        "method": "websearch",
+        "decision": "no_match",
+        "candidates": embedded_report["candidates"],
+        "claim_record": None,
+        "error": embedded_report.get("error"),
+    }
 
 
 def run_audit(dry_run: bool = False) -> dict:
     data = load_sources()
     self_name = skills_manager_root().name
-    upstreams = merged_upstreams()
 
     reports: list[dict] = []
     auto_claimed_now: list[str] = []
@@ -448,7 +354,7 @@ def run_audit(dry_run: bool = False) -> dict:
         if child.name in data["skills"]:
             continue
 
-        rep = audit_one(child.name, child, upstreams)
+        rep = audit_one(child.name, child)
         if rep["decision"] in ("needs_review", "no_match"):
             rep["search_query_hint"] = query_hint_for(child)
         reports.append(rep)
@@ -458,11 +364,6 @@ def run_audit(dry_run: bool = False) -> dict:
 
     if auto_claimed_now and not dry_run:
         save_sources(data)
-
-    existing_whitelist = load_whitelist()
-    whitelist_additions = derive_whitelist_additions(reports, [*KNOWN_UPSTREAMS, *existing_whitelist])
-    if whitelist_additions and not dry_run:
-        save_whitelist([*existing_whitelist, *whitelist_additions])
 
     # After-audit inventory: reflect the new state to the user in a single call.
     # Skipped in --dry-run because sources.json wasn't touched, so inventory
@@ -480,7 +381,6 @@ def run_audit(dry_run: bool = False) -> dict:
             1 for r in reports if r["decision"] == "git_remote_unsupported"
         ),
         "dry_run": dry_run,
-        "whitelist_appended": whitelist_additions,
     }
     return {
         "summary": summary,
@@ -492,7 +392,7 @@ def run_audit(dry_run: bool = False) -> dict:
 def main(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog="audit_unclaimed.py")
     p.add_argument("--dry-run", action="store_true",
-                    help="Report only; do not write sources.json or whitelist.json.")
+                    help="Report only; do not write sources.json.")
     args = p.parse_args(argv[1:])
     emit_json(run_audit(dry_run=args.dry_run))
 

@@ -170,7 +170,7 @@ official sources from mirrors, dotfiles, registries, and marketplace copies.
 
 **Default invocation — DO NOT add `--dry-run` unless the user explicitly asks
 for a preview.** Audit is not destructive: it only writes `sources.json` for
-low-risk evidence (`.git/config`, embedded source URL, or trusted whitelist).
+low-risk evidence (`.git/config` or embedded source URL).
 No skill files are touched. Mistakes are reversible (`sources.py remove <name>`
 and re-run). Treat audit like `update_skill.py`, not like `install_skill.py` or
 delete — no confirmation needed beforehand, just report results afterwards.
@@ -184,22 +184,19 @@ If you (agent) reflexively add `--dry-run` "to be safe", you'll surprise the
 user the same way they were surprised before this note was added: the script
 will dutifully report high-similarity trusted hits but write nothing.
 
-Per skill the workflow has four gates:
+Per skill the workflow has three gates:
 
 1. **`.git/config` inspection** (offline). If the skill directory is itself a
    git checkout pointing at github.com, claim it with the live branch +
    `rev-parse HEAD`.
 2. **SKILL.md local GitHub URL hint**. A GitHub URL written inside the local
    skill is treated as explicit evidence, then verified via raw + similarity.
-3. **Whitelist + raw + similarity**. The whitelist is the union of
-   `KNOWN_UPSTREAMS` (built-in baseline) and `whitelist.json` (trusted sources
-   confirmed by user/agent workflow).
-4. **WebSearch (agent side)**. For unresolved skills, the script emits a
+3. **WebSearch (agent side)**. For unresolved skills, the script emits a
    `search_query_hint`; the agent uses its own web search to find and judge the
    source, then registers confirmed results through `sources.py`.
 
 Confidence rules:
-- Trusted/explicit gates (`.git/config`, local GitHub URL hint, whitelist):
+- Trusted/explicit gates (`.git/config`, local GitHub URL hint):
   - `high` (both ratios ≥ 0.90) → auto-claim.
   - `installed_revision` is the upstream HEAD SHA **only when similarity is
     exactly 1.0**. Otherwise it is recorded as `null`, so inventory reports
@@ -215,9 +212,6 @@ When `installed_revision` is `null`, both `inventory --check-remote` and
 is prompted to run `update_skill.py`, which overwrites the local copy with
 upstream HEAD and writes the now-correct `installed_revision`. This is the
 self-healing path: claim makes a conservative record, update aligns it.
-
-**Whitelist.** `whitelist.json` is for trusted sources already confirmed by the
-user/agent workflow. Do not auto-grow it from open-world search evidence.
 
 **WebSearch handoff.** Every unresolved report carries a `search_query_hint`
 when the local description is long enough. Search with combinations such as:
@@ -235,19 +229,14 @@ When reviewing WebSearch results:
    mirror, awesome-list, and ordinary product repos as likely copies.
 3. Compare the candidate `SKILL.md` name, description, and opening body against
    the local skill before registering it.
-4. If a likely source repo emerges but you want code-level confirmation, run an
-   optional repo-limited check:
-   ```powershell
-   gh search code "<title or unique phrase>" --repo <owner/repo> --filename SKILL.md
-   ```
-5. Once source identity is clear, run `sources.py claim-remote` with the
+4. Once source identity is clear, run `sources.py claim-remote` with the
    candidate's url/branch/subpath. If multiple candidates still look plausible,
    ask the user instead of guessing.
 
 Output is a JSON `{summary, reports, inventory_after}` payload. Render to the
 user as:
 - **"已自动登记 K 个"** — show each (name → repo+subpath, source: git_dir /
-  embedded_url / whitelist). These were trusted/explicit matches.
+  embedded_url). These were trusted/explicit matches.
 - **"未识别 M 个"** — for each, use `search_query_hint` to run WebSearch (or
   ask the user directly). Once you have a source, **agent runs
   `sources.py claim-remote`** (if from GitHub) or `sources.py claim-local`
@@ -339,7 +328,7 @@ failure, 5 = filesystem failure during swap).
 | `check_remote.py <name>` | ls-remote a single claimed-remote skill. |
 | `install_skill.py <url> [--name N] [--branch B]` | Clone + atomic install + auto-register. |
 | `update_skill.py <name> [--dry-run]` | Clone + atomic swap. |
-| `audit_unclaimed.py [--dry-run]` | Batch identify unclaimed skills: `.git/` + local GitHub URL hints + whitelist; unresolved items get WebSearch hints. |
+| `audit_unclaimed.py [--dry-run]` | Batch identify unclaimed skills: `.git/` + local GitHub URL hints; unresolved items get WebSearch hints. |
 | `sources.py list \| remove \| claim-local \| claim-remote` | Mutate sources.json safely. |
 | `similarity.py <local.md> <remote.md>` | difflib-based file similarity for claim wizard. |
 

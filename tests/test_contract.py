@@ -505,7 +505,7 @@ class InstallSkillTests(SkillManagerContractTests):
 
 
 class AuditUnclaimedTests(SkillManagerContractTests):
-    """Audit script: .git detection + whitelist + similarity."""
+    """Audit script: .git detection + embedded source URL verification."""
 
     def _load_audit_module(self):
         for cached in ("_common", "similarity", "check_remote", "inventory", "audit_under_test"):
@@ -611,7 +611,7 @@ class AuditUnclaimedTests(SkillManagerContractTests):
         self.assertNotIn("gitlab-skill", sources["skills"])
         self.assertEqual(payload["summary"]["git_remote_unsupported"], 1)
 
-    def test_embedded_github_url_auto_claims_before_whitelist(self) -> None:
+    def test_embedded_github_url_auto_claims(self) -> None:
         upstream_text = "---\nname: embedded\ndescription: traced from body\n---\n\n# Embedded\n\nbody body.\n"
         local_text = (
             upstream_text
@@ -622,7 +622,6 @@ class AuditUnclaimedTests(SkillManagerContractTests):
         self.write_sources({})
 
         mod = self._load_audit_module()
-        mod.KNOWN_UPSTREAMS[:] = []
         mod.fetch_remote_skill_md = lambda _u, _b, _s, timeout=15: (local_text, None)
         mod.fetch_remote_sha = lambda _u, _b: ("c0ffee" * 6, None)
 
@@ -647,108 +646,6 @@ class AuditUnclaimedTests(SkillManagerContractTests):
         self.assertEqual(rec["subpath"], "skills/embedded")
         self.assertEqual(rec["installed_revision"], "c0ffee" * 6)
 
-    def test_whitelist_high_confidence_auto_claims(self) -> None:
-        # Identical SKILL.md text upstream + locally => similarity = 1.0 = "high".
-        skill_text = "---\nname: faux-skill\ndescription: hello\n---\n\n# Faux\n\nbody body body.\n"
-        skill_dir = self.write_skill("faux-skill", "hello")
-        skill_dir.joinpath("SKILL.md").write_text(skill_text, encoding="utf-8")
-        self.write_sources({})
-
-        mod = self._load_audit_module()
-        mod.KNOWN_UPSTREAMS[:] = [{
-            "url": "https://github.com/fake/repo",
-            "branch": "main",
-            "subpath_template": "skills/{name}",
-        }]
-        mod.fetch_remote_skill_md = lambda _u, _b, _s, timeout=15: (skill_text, None)
-        mod.fetch_remote_sha = lambda _u, _b: ("deadbeef" * 5, None)
-
-        from io import StringIO
-        cwd = os.getcwd()
-        os.chdir(self.manager)
-        sys.stdout = StringIO()
-        try:
-            mod.main(["audit_unclaimed.py"])
-            payload = json.loads(sys.stdout.getvalue())
-        finally:
-            sys.stdout = sys.__stdout__
-            os.chdir(cwd)
-
-        sources = json.loads((self.manager / "sources.json").read_text(encoding="utf-8"))
-        rec = sources["skills"]["faux-skill"]
-        self.assertEqual(rec["url"], "https://github.com/fake/repo")
-        self.assertEqual(rec["subpath"], "skills/faux-skill")
-        self.assertEqual(rec["installed_revision"], "deadbeef" * 5)
-        self.assertEqual(payload["summary"]["auto_claimed"], 1)
-
-    def test_whitelist_high_but_not_exact_records_null_revision(self) -> None:
-        """similarity in [0.90, 1.0) is enough to auto-claim the source repo,
-        but installed_revision must be null — local content is NOT the
-        upstream HEAD bytes, so recording HEAD would lie."""
-        local_text = "---\nname: drifted\ndescription: x\n---\n\n# Local\n\nbody body body body body body.\n"
-        # Same structure but enough word-level difference to drop similarity
-        # below 1.0 yet keep it >=0.90 ("high" confidence on the source).
-        upstream_text = "---\nname: drifted\ndescription: x\n---\n\n# Local\n\nbody body body body body body extra.\n"
-        sd = self.write_skill("drifted")
-        (sd / "SKILL.md").write_text(local_text, encoding="utf-8")
-        self.write_sources({})
-
-        mod = self._load_audit_module()
-        mod.KNOWN_UPSTREAMS[:] = [{
-            "url": "https://github.com/fake/repo",
-            "branch": "main",
-            "subpath_template": "skills/{name}",
-        }]
-        mod.fetch_remote_skill_md = lambda _u, _b, _s, timeout=15: (upstream_text, None)
-        # If we ever call fetch_remote_sha that means we'd record a HEAD SHA,
-        # which is the bug we're guarding against. Fail loudly if called.
-        def _should_not_resolve(*_a, **_k):
-            raise AssertionError("fetch_remote_sha must not be called when content differs")
-        mod.fetch_remote_sha = _should_not_resolve
-
-        from io import StringIO
-        cwd = os.getcwd()
-        os.chdir(self.manager)
-        sys.stdout = StringIO()
-        try:
-            mod.main(["audit_unclaimed.py"])
-            payload = json.loads(sys.stdout.getvalue())
-        finally:
-            sys.stdout = sys.__stdout__
-            os.chdir(cwd)
-
-        rep = next(r for r in payload["reports"] if r["name"] == "drifted")
-        self.assertEqual(rep["decision"], "auto_claim")
-        self.assertIsNone(rep["claim_record"]["installed_revision"])
-        sources = json.loads((self.manager / "sources.json").read_text(encoding="utf-8"))
-        self.assertIsNone(sources["skills"]["drifted"]["installed_revision"])
-
-    def test_whitelist_no_match_does_not_claim(self) -> None:
-        self.write_skill("homemade", "totally my own work")
-        self.write_sources({})
-
-        mod = self._load_audit_module()
-        mod.KNOWN_UPSTREAMS[:] = [{
-            "url": "https://github.com/fake/repo",
-            "branch": "main",
-            "subpath_template": "skills/{name}",
-        }]
-        mod.fetch_remote_skill_md = lambda *_a, **_k: ("", "HTTP 404")
-        from io import StringIO
-        cwd = os.getcwd()
-        os.chdir(self.manager)
-        sys.stdout = StringIO()
-        try:
-            mod.main(["audit_unclaimed.py"])
-            payload = json.loads(sys.stdout.getvalue())
-        finally:
-            sys.stdout = sys.__stdout__
-            os.chdir(cwd)
-
-        sources = json.loads((self.manager / "sources.json").read_text(encoding="utf-8"))
-        self.assertNotIn("homemade", sources["skills"])
-        self.assertEqual(payload["summary"]["no_match"], 1)
-        self.assertEqual(payload["summary"]["auto_claimed"], 0)
 
     def test_already_claimed_skills_are_skipped(self) -> None:
         self.write_skill("already-known")
@@ -882,43 +779,46 @@ class AuditWebSearchHintTests(SkillManagerContractTests):
         self.write_sources({})
 
         mod = self._load_audit_module()
-        mod.KNOWN_UPSTREAMS[:] = []
         payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
 
         self.assertFalse(any(key.startswith("search_") for key in payload["summary"]))
         rep = next(r for r in payload["reports"] if r["name"] == "websearch-needed")
         self.assertEqual(rep["decision"], "no_match")
-        self.assertEqual(rep["method"], "whitelist")
+        self.assertEqual(rep["method"], "websearch")
         self.assertIsInstance(rep.get("search_query_hint"), str)
 
-    def test_derive_whitelist_additions_ignores_search_evidence(self) -> None:
-        mod = self._load_audit_module()
-        reports = [
-            {"name": "foo", "method": "search", "decision": "auto_claim", "claim_record": {
-                "url": "https://github.com/alice/kit", "branch": "main", "subpath": "skills/foo"}},
-            {"name": "bar", "method": "search", "decision": "auto_claim", "claim_record": {
-                "url": "https://github.com/alice/kit", "branch": "main", "subpath": "skills/bar"}},
-            {"name": "solo", "method": "search", "decision": "auto_claim", "claim_record": {
-                "url": "https://github.com/bob/other", "branch": "main", "subpath": "x/solo"}},
-            {"name": "wl", "method": "whitelist", "decision": "auto_claim", "claim_record": {
-                "url": "https://github.com/whitelist/repo", "branch": "main", "subpath": "skills/wl"}},
-        ]
-        self.assertEqual(mod.derive_whitelist_additions(reports, []), [])
+    def test_whitelist_file_is_not_used_for_source_claiming(self) -> None:
+        self.write_skill(
+            "whitelist-only",
+            "Distinctive description that should be handed to WebSearch instead of whitelist lookup.",
+        )
+        self.write_sources({})
+        (self.manager / "whitelist.json").write_text(
+            json.dumps({
+                "version": 1,
+                "entries": [{
+                    "url": "https://github.com/example/skills",
+                    "branch": "main",
+                    "subpath_template": "skills/{name}",
+                }],
+            }),
+            encoding="utf-8",
+        )
 
-    def test_derive_whitelist_skips_already_present(self) -> None:
         mod = self._load_audit_module()
-        reports = [
-            {"name": "foo", "method": "search", "decision": "auto_claim", "claim_record": {
-                "url": "https://github.com/x/y", "branch": "main", "subpath": "s/foo"}},
-            {"name": "bar", "method": "search", "decision": "auto_claim", "claim_record": {
-                "url": "https://github.com/x/y", "branch": "main", "subpath": "s/bar"}},
-        ]
-        existing = [{
-            "url": "https://github.com/x/y",
-            "branch": "main",
-            "subpath_template": "s/{name}",
-        }]
-        self.assertEqual(mod.derive_whitelist_additions(reports, existing), [])
+
+        def _should_not_fetch(*_a, **_k):
+            raise AssertionError("whitelist gate must not fetch remote SKILL.md")
+
+        mod.fetch_remote_skill_md = _should_not_fetch
+        payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
+
+        rep = next(r for r in payload["reports"] if r["name"] == "whitelist-only")
+        self.assertEqual(rep["decision"], "no_match")
+        self.assertEqual(rep["method"], "websearch")
+        self.assertIsInstance(rep.get("search_query_hint"), str)
+        sources = json.loads((self.manager / "sources.json").read_text(encoding="utf-8"))
+        self.assertNotIn("whitelist-only", sources["skills"])
 
     def test_no_match_report_carries_search_query_hint(self) -> None:
         """When a skill ends up no_match, the agent needs a phrase to feed
@@ -931,7 +831,6 @@ class AuditWebSearchHintTests(SkillManagerContractTests):
         self.write_sources({})
 
         mod = self._load_audit_module()
-        mod.KNOWN_UPSTREAMS[:] = []
 
         payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
 
@@ -947,7 +846,6 @@ class AuditWebSearchHintTests(SkillManagerContractTests):
         self.write_sources({})
 
         mod = self._load_audit_module()
-        mod.KNOWN_UPSTREAMS[:] = []
 
         payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
 
