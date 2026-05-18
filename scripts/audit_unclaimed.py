@@ -537,12 +537,7 @@ def derive_whitelist_additions(reports: list[dict], existing: list[dict]) -> lis
     return additions
 
 
-def main(argv: list[str]) -> None:
-    p = argparse.ArgumentParser(prog="audit_unclaimed.py")
-    p.add_argument("--dry-run", action="store_true",
-                    help="Report only; do not write sources.json or whitelist.json.")
-    args = p.parse_args(argv[1:])
-
+def run_audit(dry_run: bool = False) -> dict:
     data = load_sources()
     self_name = skills_manager_root().name
     upstreams = merged_upstreams()
@@ -568,16 +563,16 @@ def main(argv: list[str]) -> None:
         if rep["decision"] in ("needs_review", "no_match"):
             rep["search_query_hint"] = query_hint_for(child)
         reports.append(rep)
-        if rep["decision"] == "auto_claim" and not args.dry_run:
+        if rep["decision"] == "auto_claim" and not dry_run:
             data["skills"][child.name] = rep["claim_record"]
             auto_claimed_now.append(child.name)
 
-    if auto_claimed_now and not args.dry_run:
+    if auto_claimed_now and not dry_run:
         save_sources(data)
 
     existing_whitelist = load_whitelist()
     whitelist_additions = derive_whitelist_additions(reports, [*KNOWN_UPSTREAMS, *existing_whitelist])
-    if whitelist_additions and not args.dry_run:
+    if whitelist_additions and not dry_run:
         save_whitelist([*existing_whitelist, *whitelist_additions])
 
     if breaker["failures"] >= SEARCH_FAILURE_BUDGET and search_disabled_reason is None:
@@ -587,7 +582,7 @@ def main(argv: list[str]) -> None:
     # Skipped in --dry-run because sources.json wasn't touched, so inventory
     # would just print the pre-audit state and confuse the reader.
     inventory_after: list[dict] | None = None
-    if not args.dry_run:
+    if not dry_run:
         inventory_after = inventory.scan(check_remote=True)
 
     summary = {
@@ -598,17 +593,25 @@ def main(argv: list[str]) -> None:
         "git_remote_unsupported": sum(
             1 for r in reports if r["decision"] == "git_remote_unsupported"
         ),
-        "dry_run": args.dry_run,
+        "dry_run": dry_run,
         "search_used": search_enabled,
         "search_disabled_reason": search_disabled_reason,
         "search_failures": breaker["failures"],
         "whitelist_appended": whitelist_additions,
     }
-    emit_json({
+    return {
         "summary": summary,
         "reports": reports,
         "inventory_after": inventory_after,
-    })
+    }
+
+
+def main(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(prog="audit_unclaimed.py")
+    p.add_argument("--dry-run", action="store_true",
+                    help="Report only; do not write sources.json or whitelist.json.")
+    args = p.parse_args(argv[1:])
+    emit_json(run_audit(dry_run=args.dry_run))
 
 
 if __name__ == "__main__":

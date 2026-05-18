@@ -37,13 +37,27 @@ installation).
 Triggers: "list my skills", "what skills do I have", "show skills", "which
 skills are outdated", "check for updates".
 
-Run inventory with remote check:
+Run full inventory by default. This keeps the list command ergonomic: if the
+first cheap scan finds unclaimed skills, inventory runs the source audit once,
+writes high-confidence claims, and returns the final post-audit table data.
+
+```powershell
+python <skills-manager>/scripts/inventory.py --check-remote --audit-unclaimed
+```
+
+If the user explicitly says "preview only", "just list, don't write", or "no
+audit", use the read-only command instead:
 
 ```powershell
 python <skills-manager>/scripts/inventory.py --check-remote
 ```
 
-Parse the JSON output and render as a Chinese markdown table:
+Output shapes:
+- Without `--audit-unclaimed`: JSON array of inventory entries.
+- With `--audit-unclaimed`: JSON object `{ "entries": [...], "audit": {...} }`.
+
+Parse `entries` (or the bare array for read-only output) and render as a Chinese
+markdown table:
 
 | Skill名称 | 类型 | 功能描述 | 状态 |
 |---|---|---|---|
@@ -62,7 +76,9 @@ Display mappings:
   `local` → `本地`; `unclaimed` / `unknown` / `error` / `null` → `未知`.
 
 After the table, summarize in Chinese: "共 X 个，最新 Y 个，过期 Z 个，本地
-W 个，未知 V 个". Offer next steps: "要更新过期项吗？要认领未知来源吗？"
+W 个，未知 V 个". If `audit.ran` is true, also summarize how many were
+auto-claimed, need review, or had no match. Offer next steps: "要更新过期项吗？
+要处理需确认/未识别的来源吗？"
 
 If the user later asks something like "just show me the ones with updates",
 re-filter the same JSON output — do **not** re-run inventory.

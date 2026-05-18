@@ -85,23 +85,23 @@
       "subpath": "skills/writing-skills",
       "installed_revision": "f2cbfbefebbfef77321e4c9abc9e949826bea9d7"
     },
-    "karpathy-guidelines": {
-      "url": "https://github.com/forrestchang/andrej-karpathy-skills",
-      "branch": "main",
-      "subpath": "skills/karpathy-guidelines",
-      "installed_revision": "2c606141936f1eeef17fa3043a72095b4765b9c2"
-    },
-    "skill-creator": {
-      "url": "https://github.com/anthropics/claude-plugins-official",
-      "branch": "main",
-      "subpath": "plugins/skill-creator/skills/skill-creator",
-      "installed_revision": "b5a156b6ecd2f69c418184b7c093930ddabaf9c0"
-    },
     "web-access": {
       "url": "https://github.com/eze-is/web-access",
       "branch": "main",
       "subpath": "",
       "installed_revision": null
+    },
+    "karpathy-guidelines": {
+      "url": "https://github.com/multica-ai/andrej-karpathy-skills",
+      "branch": "main",
+      "subpath": "skills/karpathy-guidelines",
+      "installed_revision": "2c606141936f1eeef17fa3043a72095b4765b9c2"
+    },
+    "skill-creator": {
+      "url": "https://github.com/anthropics/skills",
+      "branch": "main",
+      "subpath": "skills/skill-creator",
+      "installed_revision": "6a5bb06904ab164a345e41c381fc9097954b83da"
     }
   }
 }

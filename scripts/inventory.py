@@ -3,8 +3,10 @@
 Usage:
     python inventory.py                    # cheap scan only
     python inventory.py --check-remote     # also runs ls-remote concurrently
+    python inventory.py --check-remote --audit-unclaimed
+                                           # audit unknown sources, then list
 
-Output (stdout, JSON array): one entry per skill directory.
+Default output (stdout, JSON array): one entry per skill directory.
     {
       "name": "brainstorming",
       "path": "<abs path>",
@@ -22,6 +24,7 @@ Output (stdout, JSON array): one entry per skill directory.
 Notes:
 - Skips the skills-manager directory itself and dotted directories.
 - With --check-remote, ls-remote is run in parallel with a small thread pool.
+- With --audit-unclaimed, output is `{ "entries": [...], "audit": {...} }`.
 """
 from __future__ import annotations
 
@@ -120,13 +123,46 @@ def scan(check_remote: bool) -> list[dict]:
     return entries
 
 
+def audit_metadata(payload: dict) -> dict:
+    summary = payload.get("summary") or {}
+    return {
+        "ran": True,
+        "auto_claimed": summary.get("auto_claimed", 0),
+        "needs_review": summary.get("needs_review", 0),
+        "no_match": summary.get("no_match", 0),
+        "git_remote_unsupported": summary.get("git_remote_unsupported", 0),
+        "search_used": summary.get("search_used", False),
+        "search_disabled_reason": summary.get("search_disabled_reason"),
+        "search_failures": summary.get("search_failures", 0),
+        "whitelist_appended": summary.get("whitelist_appended", []),
+        "reports": payload.get("reports", []),
+    }
+
+
+def scan_with_audit(check_remote: bool) -> dict:
+    initial = scan(check_remote=False)
+    if not any(e["type"] == "unclaimed" for e in initial):
+        entries = scan(check_remote=check_remote) if check_remote else initial
+        return {"entries": entries, "audit": {"ran": False}}
+
+    import audit_unclaimed
+
+    payload = audit_unclaimed.run_audit(dry_run=False)
+    entries = payload.get("inventory_after") or scan(check_remote=check_remote)
+    return {"entries": entries, "audit": audit_metadata(payload)}
+
+
 def main(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog="inventory.py")
     p.add_argument("--check-remote", action="store_true",
                    help="Also run git ls-remote concurrently for claimed remote skills.")
+    p.add_argument("--audit-unclaimed", action="store_true",
+                   help="Audit unclaimed skills first; outputs {entries, audit}.")
     args = p.parse_args(argv[1:])
-    entries = scan(check_remote=args.check_remote)
-    emit_json(entries)
+    if args.audit_unclaimed:
+        emit_json(scan_with_audit(check_remote=args.check_remote))
+    else:
+        emit_json(scan(check_remote=args.check_remote))
 
 
 if __name__ == "__main__":

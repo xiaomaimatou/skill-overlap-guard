@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -84,6 +85,101 @@ class SkillManagerContractTests(unittest.TestCase):
         self.assertEqual(rows[0]["update_status"], "local")
         self.assertNotIn("current_content_hash", rows[0])
         self.assertNotIn("modified_locally", rows[0])
+
+    def _load_inventory_module(self):
+        for cached in ("_common", "check_remote", "inventory_under_test"):
+            sys.modules.pop(cached, None)
+        sys.path.insert(0, str(self.manager / "scripts"))
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "inventory_under_test",
+                self.manager / "scripts" / "inventory.py",
+            )
+            assert spec and spec.loader
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        finally:
+            sys.path.pop(0)
+        return module
+
+    def _run_inventory_module(self, mod, argv: list[str]) -> dict | list:
+        from io import StringIO
+        cwd = os.getcwd()
+        os.chdir(self.manager)
+        original_stdout = sys.stdout
+        sys.stdout = StringIO()
+        try:
+            mod.main(argv)
+            return json.loads(sys.stdout.getvalue())
+        finally:
+            sys.stdout = original_stdout
+            os.chdir(cwd)
+
+    def test_inventory_audit_unclaimed_returns_envelope_with_audit_result(self) -> None:
+        self.write_skill("unknown-skill")
+        self.write_sources({})
+        mod = self._load_inventory_module()
+
+        def _fake_run_audit(dry_run: bool = False):
+            self.assertFalse(dry_run)
+            return {
+                "summary": {
+                    "auto_claimed": 1,
+                    "needs_review": 0,
+                    "no_match": 0,
+                    "search_used": False,
+                    "search_disabled_reason": "gh unavailable",
+                },
+                "reports": [{"name": "unknown-skill", "decision": "auto_claim"}],
+                "inventory_after": [{
+                    "name": "unknown-skill",
+                    "path": str(self.skills_root / "unknown-skill"),
+                    "has_skill_md": True,
+                    "description": "Example skill",
+                    "claimed": True,
+                    "type": "remote",
+                    "source": {"url": "https://github.com/example/unknown-skill"},
+                    "update_status": "update_available",
+                    "remote_revision": "abc123",
+                    "check_error": None,
+                }],
+            }
+
+        sys.modules["audit_unclaimed"] = types.SimpleNamespace(run_audit=_fake_run_audit)
+        try:
+            payload = self._run_inventory_module(
+                mod, ["inventory.py", "--check-remote", "--audit-unclaimed"]
+            )
+        finally:
+            sys.modules.pop("audit_unclaimed", None)
+
+        self.assertIsInstance(payload, dict)
+        self.assertEqual(payload["entries"][0]["type"], "remote")
+        self.assertEqual(payload["audit"]["ran"], True)
+        self.assertEqual(payload["audit"]["auto_claimed"], 1)
+        self.assertEqual(payload["audit"]["needs_review"], 0)
+        self.assertEqual(payload["audit"]["no_match"], 0)
+        self.assertEqual(payload["audit"]["search_disabled_reason"], "gh unavailable")
+
+    def test_inventory_audit_unclaimed_skips_audit_when_everything_is_claimed(self) -> None:
+        self.write_skill("private-skill")
+        self.write_sources({"private-skill": {}})
+        mod = self._load_inventory_module()
+
+        def _should_not_call(*_a, **_k):
+            raise AssertionError("audit should not run when inventory has no unclaimed skills")
+
+        sys.modules["audit_unclaimed"] = types.SimpleNamespace(run_audit=_should_not_call)
+        try:
+            payload = self._run_inventory_module(
+                mod, ["inventory.py", "--check-remote", "--audit-unclaimed"]
+            )
+        finally:
+            sys.modules.pop("audit_unclaimed", None)
+
+        self.assertIsInstance(payload, dict)
+        self.assertEqual(payload["entries"][0]["type"], "local")
+        self.assertEqual(payload["audit"], {"ran": False})
 
     def test_claim_remote_does_not_write_installed_content_hash(self) -> None:
         self.write_skill("git-skill")
