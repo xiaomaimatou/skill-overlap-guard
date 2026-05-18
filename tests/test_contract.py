@@ -997,9 +997,131 @@ class AuditWithSearchTests(SkillManagerContractTests):
         payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
 
         self.assertEqual(payload["summary"]["auto_claimed"], 1)
-        self.assertIn(("karpathy-guidelines", 50), calls)
-        self.assertIn(("Karpathy Guidelines", 50), calls)
+        self.assertIn(("karpathy-guidelines", 20), calls)
+        self.assertIn(("Karpathy Guidelines", 20), calls)
         self.assertGreater(len(calls), 1)
+
+    def test_search_limits_queries_results_and_verified_candidates(self) -> None:
+        skill_text = (
+            "---\nname: budgeted-skill\n"
+            "description: Description with enough distinctive words to trigger several search queries during audit.\n"
+            "---\n\n# Budgeted Skill\n\n"
+            "Another distinctive sentence with enough words for a body query.\n"
+        )
+        sd = self.write_skill("budgeted-skill")
+        (sd / "SKILL.md").write_text(skill_text, encoding="utf-8")
+        self.write_sources({})
+
+        mod = self._load_audit_module()
+        mod.KNOWN_UPSTREAMS[:] = []
+        mod.gh_search.gh_available = lambda: True
+        calls = []
+
+        def _search(query, max_results=50):
+            calls.append((query, max_results))
+            return ([{
+                "owner": f"owner{len(calls)}",
+                "repo": f"repo{i}",
+                "branch": "main",
+                "subpath": f"copies/{len(calls)}/{i}",
+                "path": f"copies/{len(calls)}/{i}/SKILL.md",
+            } for i in range(25)], None)
+
+        fetched = []
+        mod.gh_search.search_skill_md = _search
+        mod.fetch_remote_skill_md = lambda _u, _b, subpath, timeout=15: (
+            fetched.append(subpath) or f"not the same {subpath}", None
+        )
+        mod.fetch_remote_sha = lambda _u, _b: (_ for _ in ()).throw(
+            AssertionError("low-confidence candidates must not resolve SHA")
+        )
+
+        payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
+
+        rep = next(r for r in payload["reports"] if r["name"] == "budgeted-skill")
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(max_results == 20 for _query, max_results in calls))
+        self.assertEqual(len(fetched), 40)
+        self.assertEqual(rep["verified_candidate_count"], 40)
+        self.assertEqual(rep["skipped_candidate_count"], 35)
+        self.assertEqual(rep["search_verify_budget"], 40)
+        self.assertEqual(len(rep["search_queries"]), 3)
+        self.assertEqual(len(rep["result_count_by_query"]), 3)
+        self.assertIn("elapsed_ms", rep)
+
+    def test_search_exact_strong_path_early_stops_and_resolves_sha_once(self) -> None:
+        skill_text = "---\nname: winner\ndescription: enough words for searching this exact skill source.\n---\n\n# Winner\n"
+        sd = self.write_skill("winner")
+        (sd / "SKILL.md").write_text(skill_text, encoding="utf-8")
+        self.write_sources({})
+
+        mod = self._load_audit_module()
+        mod.KNOWN_UPSTREAMS[:] = []
+        mod.gh_search.gh_available = lambda: True
+        calls = []
+
+        def _search(query, max_results=50):
+            calls.append(query)
+            if len(calls) > 1:
+                return ([], None)
+            return ([
+                {"owner": "mirror", "repo": "dotfiles", "branch": "main",
+                 "subpath": ".agents/skills/winner", "path": ".agents/skills/winner/SKILL.md"},
+                {"owner": "source", "repo": "skills", "branch": "main",
+                 "subpath": "skills/winner", "path": "skills/winner/SKILL.md"},
+                {"owner": "mirror2", "repo": "registry", "branch": "main",
+                 "subpath": "registry/winner", "path": "registry/winner/SKILL.md"},
+            ], None)
+
+        fetched = []
+        sha_calls = []
+        mod.gh_search.search_skill_md = _search
+        mod.fetch_remote_skill_md = lambda _u, _b, subpath, timeout=15: (
+            fetched.append(subpath) or skill_text, None
+        )
+        mod.fetch_remote_sha = lambda url, branch: (
+            sha_calls.append((url, branch)) or ("c0ffee" * 6, None)
+        )
+
+        payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
+
+        rep = next(r for r in payload["reports"] if r["name"] == "winner")
+        self.assertEqual(rep["decision"], "auto_claim")
+        self.assertEqual(rep["claim_record"]["url"], "https://github.com/source/skills")
+        self.assertEqual(rep["claim_record"]["installed_revision"], "c0ffee" * 6)
+        self.assertEqual(fetched, ["skills/winner"])
+        self.assertEqual(sha_calls, [("https://github.com/source/skills", "main")])
+        self.assertEqual(rep["verified_candidate_count"], 1)
+        self.assertGreater(rep["skipped_candidate_count"], 0)
+
+    def test_search_multiple_weak_exact_matches_need_review_without_sha(self) -> None:
+        skill_text = "---\nname: copied\ndescription: enough words for searching copied exact matches.\n---\n\n# Copied\n"
+        sd = self.write_skill("copied")
+        (sd / "SKILL.md").write_text(skill_text, encoding="utf-8")
+        self.write_sources({})
+
+        mod = self._load_audit_module()
+        mod.KNOWN_UPSTREAMS[:] = []
+        mod.gh_search.gh_available = lambda: True
+        mod.gh_search.search_skill_md = lambda _query, max_results=50: ([
+            {"owner": "mirror", "repo": "dotfiles", "branch": "main",
+             "subpath": ".agents/skills/copied", "path": ".agents/skills/copied/SKILL.md"},
+            {"owner": "copy", "repo": "registry", "branch": "main",
+             "subpath": "marketplace/copied", "path": "marketplace/copied/SKILL.md"},
+        ], None)
+        mod.fetch_remote_skill_md = lambda _u, _b, _s, timeout=15: (skill_text, None)
+        mod.fetch_remote_sha = lambda _u, _b: (_ for _ in ()).throw(
+            AssertionError("weak Code Search matches must not resolve SHA")
+        )
+
+        payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
+
+        rep = next(r for r in payload["reports"] if r["name"] == "copied")
+        self.assertEqual(rep["decision"], "needs_review")
+        self.assertIsNone(rep["claim_record"])
+        self.assertEqual(payload["summary"]["auto_claimed"], 0)
+        sources = json.loads((self.manager / "sources.json").read_text(encoding="utf-8"))
+        self.assertNotIn("copied", sources["skills"])
 
     def test_search_skipped_when_gh_unavailable(self) -> None:
         sd = self.write_skill("alone-skill", "totally homemade thing here only mine.")

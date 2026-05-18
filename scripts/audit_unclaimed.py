@@ -61,6 +61,7 @@ import configparser
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 from _common import (
@@ -89,6 +90,9 @@ KNOWN_UPSTREAMS: list[dict] = [
 ]
 
 SEARCH_FAILURE_BUDGET = 3
+SEARCH_QUERY_LIMIT = 3
+SEARCH_RESULTS_PER_QUERY = 20
+SEARCH_VERIFY_BUDGET = 40
 
 
 def whitelist_path() -> Path:
@@ -253,7 +257,8 @@ def embedded_github_candidates(text: str) -> list[dict]:
 
 
 def _verify_and_build_claim(local_text: str, local_head: str, candidate: dict,
-                              source_label: str) -> tuple[dict, dict | None]:
+                              source_label: str,
+                              resolve_revision: bool = True) -> tuple[dict, dict | None]:
     """Fetch raw + score similarity. Returns (candidate_with_scores, claim_record_or_none).
 
     `candidate` must include url, branch, subpath. `claim_record_or_none` is set
@@ -284,12 +289,17 @@ def _verify_and_build_claim(local_text: str, local_head: str, candidate: dict,
     # local copy is an ancestor / fork / locally-edited version, and recording
     # remote HEAD would silently lie about installed_revision.
     is_exact_match = full >= 1.0 and head >= 1.0
-    if is_exact_match:
+    if is_exact_match and resolve_revision:
         sha, err = fetch_remote_sha(candidate["url"], candidate["branch"])
         if err:
             enriched["error"] = f"matched but cannot resolve revision: {err}"
             return (enriched, None)
         installed_revision: str | None = sha
+    elif is_exact_match:
+        installed_revision = None
+        enriched["installed_revision_deferred"] = (
+            "exact match; revision resolution deferred until final winner selection"
+        )
     else:
         installed_revision = None
         enriched["installed_revision_unknown"] = (
@@ -381,58 +391,159 @@ def audit_via_whitelist(name: str, local_text: str, local_head: str,
     return report
 
 
+def _search_candidate_key(item: dict) -> tuple[str, str, str]:
+    return (
+        f"https://github.com/{item['owner']}/{item['repo']}",
+        item["branch"],
+        item["subpath"],
+    )
+
+
+def _is_strong_search_path(name: str, path: str) -> bool:
+    return path.replace("\\", "/").lower() == f"skills/{name.lower()}/skill.md"
+
+
+def _search_candidate_sort_key(name: str, item: dict) -> tuple[int, str, str]:
+    path = (item.get("path") or "").replace("\\", "/").lower()
+    repo = f"{item.get('owner', '')}/{item.get('repo', '')}".lower()
+    score = 100
+    if _is_strong_search_path(name, path):
+        score -= 100
+    elif path.endswith(f"/{name.lower()}/skill.md"):
+        score -= 40
+    if name.lower().replace("-", "") in repo.replace("-", ""):
+        score -= 10
+    noisy_markers = (
+        ".agents/skills",
+        ".claude/skills",
+        ".codex/skills",
+        "dotfiles",
+        "marketplace",
+        "mirror",
+        "registry",
+    )
+    if any(marker in path or marker in repo for marker in noisy_markers):
+        score += 60
+    if path.endswith(".bak") or "/translations/" in path or "/translated/" in path:
+        score += 30
+    return score, repo, path
+
+
+def _candidate_from_search_item(item: dict) -> dict:
+    return {
+        "url": f"https://github.com/{item['owner']}/{item['repo']}",
+        "branch": item["branch"],
+        "subpath": item["subpath"],
+    }
+
+
+def _claim_record_for_search_winner(enriched: dict) -> tuple[dict | None, str | None]:
+    exact = enriched.get("full_ratio") == 1.0 and enriched.get("head_ratio") == 1.0
+    installed_revision: str | None = None
+    if exact:
+        sha, err = fetch_remote_sha(enriched["url"], enriched["branch"])
+        if err:
+            return None, f"matched but cannot resolve revision: {err}"
+        installed_revision = sha
+    return {
+        "url": enriched["url"],
+        "branch": enriched["branch"],
+        "subpath": enriched["subpath"],
+        "installed_revision": installed_revision,
+    }, None
+
+
 def audit_via_search(name: str, skill_dir: Path, local_text: str, local_head: str,
                       breaker: dict) -> dict:
     """Third gate: GitHub Code Search. Mutates breaker on failure."""
+    started = time.monotonic()
     report: dict = {
         "method": "search",
         "decision": "no_match",
         "candidates": [],
         "claim_record": None,
         "error": None,
+        "search_queries": [],
+        "result_count_by_query": {},
+        "verified_candidate_count": 0,
+        "skipped_candidate_count": 0,
+        "search_verify_budget": SEARCH_VERIFY_BUDGET,
+        "elapsed_ms": 0,
     }
 
-    queries = search_queries_for(name, skill_dir)
+    queries = search_queries_for(name, skill_dir)[:SEARCH_QUERY_LIMIT]
+    report["search_queries"] = queries
     if not queries:
         report["error"] = "no useful search query could be built"
+        report["elapsed_ms"] = round((time.monotonic() - started) * 1000)
         return report
 
-    best_high_record: dict | None = None
-    best_high_full: float = -1.0
-    has_mid = False
+    all_items: list[dict] = []
     seen_candidates: set[tuple[str, str, str]] = set()
+    overflow_skipped = 0
     for query in queries:
-        items, err = gh_search.search_skill_md(query, max_results=50)
+        items, err = gh_search.search_skill_md(query, max_results=SEARCH_RESULTS_PER_QUERY)
+        report["result_count_by_query"][query] = len(items)
         if err:
             breaker["failures"] += 1
             report["error"] = err
+            report["elapsed_ms"] = round((time.monotonic() - started) * 1000)
             return report
-        for item in items:
-            cand_input = {
-                "url": f"https://github.com/{item['owner']}/{item['repo']}",
-                "branch": item["branch"],
-                "subpath": item["subpath"],
-            }
-            key = (cand_input["url"], cand_input["branch"], cand_input["subpath"])
+        if len(items) > SEARCH_RESULTS_PER_QUERY:
+            overflow_skipped += len(items) - SEARCH_RESULTS_PER_QUERY
+        for item in items[:SEARCH_RESULTS_PER_QUERY]:
+            key = _search_candidate_key(item)
             if key in seen_candidates:
                 continue
             seen_candidates.add(key)
-            enriched, record = _verify_and_build_claim(local_text, local_head, cand_input, "search")
-            enriched["upstream_path"] = item.get("path", "")
-            enriched["search_query"] = query
-            report["candidates"].append(enriched)
-            if record is not None and enriched.get("full_ratio", 0) > best_high_full:
-                best_high_record = record
-                best_high_full = enriched["full_ratio"]
-            elif enriched.get("confidence") == "mid":
-                has_mid = True
+            all_items.append(item)
 
-    if best_high_record is not None:
-        report["decision"] = "auto_claim"
-        report["claim_record"] = best_high_record
-    elif has_mid:
+    all_items.sort(key=lambda item: _search_candidate_sort_key(name, item))
+
+    best_strong_high: dict | None = None
+    best_high_full: float = -1.0
+    has_mid = False
+    high_seen = False
+    verified = 0
+    for item in all_items[:SEARCH_VERIFY_BUDGET]:
+        cand_input = _candidate_from_search_item(item)
+        print(
+            f"audit search: {name} verifying {verified + 1}/{SEARCH_VERIFY_BUDGET} "
+            f"{cand_input['url']} {cand_input['subpath']}",
+            file=sys.stderr,
+        )
+        enriched, _record = _verify_and_build_claim(
+            local_text, local_head, cand_input, "search", resolve_revision=False
+        )
+        verified += 1
+        enriched["upstream_path"] = item.get("path", "")
+        enriched["search_path_strong"] = _is_strong_search_path(name, enriched["upstream_path"])
+        report["candidates"].append(enriched)
+        if enriched.get("confidence") == "high":
+            high_seen = True
+            if enriched["search_path_strong"] and enriched.get("full_ratio", 0) > best_high_full:
+                best_strong_high = enriched
+                best_high_full = enriched["full_ratio"]
+                if enriched.get("full_ratio") == 1.0 and enriched.get("head_ratio") == 1.0:
+                    break
+        elif enriched.get("confidence") == "mid":
+            has_mid = True
+
+    report["verified_candidate_count"] = verified
+    report["skipped_candidate_count"] = max(0, len(all_items) - verified) + overflow_skipped
+
+    if best_strong_high is not None:
+        record, err = _claim_record_for_search_winner(best_strong_high)
+        if err:
+            report["decision"] = "needs_review"
+            report["error"] = err
+        else:
+            report["decision"] = "auto_claim"
+            report["claim_record"] = record
+    elif high_seen or has_mid:
         report["decision"] = "needs_review"
 
+    report["elapsed_ms"] = round((time.monotonic() - started) * 1000)
     return report
 
 
@@ -534,6 +645,16 @@ def audit_one(name: str, skill_dir: Path, upstreams: list[dict],
         *wl_report["candidates"],
         *search_report["candidates"],
     ]
+    for key in (
+        "search_queries",
+        "result_count_by_query",
+        "verified_candidate_count",
+        "skipped_candidate_count",
+        "search_verify_budget",
+        "elapsed_ms",
+    ):
+        if key in search_report:
+            wl_report[key] = search_report[key]
     if search_report.get("error"):
         wl_report["error"] = wl_report.get("error") or search_report["error"]
     return {"name": name, **wl_report}
