@@ -41,7 +41,7 @@ Clone or copy this directory into your skills root:
 
 ```bash
 cd ~/.claude/skills          # or your agent's skills root
-git clone https://github.com/<owner>/skills-manager.git
+git clone https://github.com/fan18817202997/skills-manager.git
 ```
 
 The skill is ready immediately — no dependencies beyond Python 3.9+ and `git`.
