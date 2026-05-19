@@ -889,6 +889,40 @@ class WebSearchPhraseTests(unittest.TestCase):
         self.assertIsNone(mod.extract_query_phrase(""))
 
 
+class SkillPackageCompatibilityTests(unittest.TestCase):
+    """Repository-level packaging contracts for portable SKILL.md agents."""
+
+    def test_committed_sources_json_is_clean_for_open_source_distribution(self) -> None:
+        sources = json.loads((SKILL_MANAGER / "sources.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(sources, {"version": 1, "skills": {}})
+
+    def test_skill_md_documents_single_instance_cross_agent_boundary(self) -> None:
+        text = (SKILL_MANAGER / "SKILL.md").read_text(encoding="utf-8")
+
+        for phrase in (
+            "Claude Code",
+            "Cursor",
+            "Codex CLI",
+            "single skills-manager instance",
+            "sibling skills",
+            "does not aggregate skills across Claude Code, Cursor, and Codex CLI",
+        ):
+            self.assertIn(phrase, text)
+
+    def test_skill_description_front_loads_portable_trigger_words(self) -> None:
+        text = (SKILL_MANAGER / "SKILL.md").read_text(encoding="utf-8")
+        fm = text.split("---", 2)[1]
+
+        for phrase in (
+            "List, check, update, install, delete, and claim installed skills",
+            "Claude Code",
+            "Cursor",
+            "Codex CLI",
+        ):
+            self.assertIn(phrase, fm)
+
+
 class AuditWebSearchHintTests(SkillManagerContractTests):
     """audit_unclaimed.py leaves open-world source tracing to the agent."""
 
