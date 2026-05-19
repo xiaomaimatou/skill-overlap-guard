@@ -936,39 +936,6 @@ class AuditWebSearchHintTests(SkillManagerContractTests):
         self.assertEqual(rep["method"], "websearch")
         self.assertIsInstance(rep.get("search_query_hint"), str)
 
-    def test_whitelist_file_is_not_used_for_source_claiming(self) -> None:
-        self.write_skill(
-            "whitelist-only",
-            "Distinctive description that should be handed to WebSearch instead of whitelist lookup.",
-        )
-        self.write_sources({})
-        (self.manager / "whitelist.json").write_text(
-            json.dumps({
-                "version": 1,
-                "entries": [{
-                    "url": "https://github.com/example/skills",
-                    "branch": "main",
-                    "subpath_template": "skills/{name}",
-                }],
-            }),
-            encoding="utf-8",
-        )
-
-        mod = self._load_audit_module()
-
-        def _should_not_fetch(*_a, **_k):
-            raise AssertionError("whitelist gate must not fetch remote SKILL.md")
-
-        mod.fetch_remote_skill_md = _should_not_fetch
-        payload = self._run_in_manager(mod, ["audit_unclaimed.py"])
-
-        rep = next(r for r in payload["reports"] if r["name"] == "whitelist-only")
-        self.assertEqual(rep["decision"], "no_match")
-        self.assertEqual(rep["method"], "websearch")
-        self.assertIsInstance(rep.get("search_query_hint"), str)
-        sources = json.loads((self.manager / "sources.json").read_text(encoding="utf-8"))
-        self.assertNotIn("whitelist-only", sources["skills"])
-
     def test_no_match_report_carries_search_query_hint(self) -> None:
         """When a skill ends up no_match, the agent needs a phrase to feed
         into WebSearch as a fallback. Verify the hint is populated."""

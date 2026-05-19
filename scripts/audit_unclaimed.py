@@ -53,6 +53,7 @@ from _common import (
     emit_json,
     fetch_remote_skill_md,
     load_sources,
+    normalize_github_repo_url,
     parse_frontmatter,
     run_git,
     save_sources,
@@ -82,19 +83,6 @@ def detect_git_remote(skill_dir: Path) -> str | None:
     return None
 
 
-def normalize_github_url(url: str) -> str | None:
-    """Normalize a remote URL to https://github.com/<owner>/<repo>, or None
-    if the URL is not on github.com."""
-    s = url.strip().removesuffix(".git").rstrip("/")
-    if s.startswith("git@github.com:"):
-        rest = s[len("git@github.com:"):]
-        return f"https://github.com/{rest}"
-    if s.startswith("https://github.com/") or s.startswith("http://github.com/"):
-        rest = s.split("github.com/", 1)[1]
-        return f"https://github.com/{rest}"
-    return None
-
-
 def audit_via_git_dir(skill_dir: Path) -> dict | None:
     """If <skill>/.git points at a github remote, build a claim record.
 
@@ -105,7 +93,7 @@ def audit_via_git_dir(skill_dir: Path) -> dict | None:
     if raw_remote is None:
         return None
 
-    normalized = normalize_github_url(raw_remote)
+    normalized = normalize_github_repo_url(raw_remote)
     if normalized is None:
         return {
             "method": "git_dir",

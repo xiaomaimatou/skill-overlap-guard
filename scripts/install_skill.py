@@ -181,7 +181,6 @@ def main(argv: list[str]) -> None:
 
     backup_dir: Path | None = None
     central: Path | None = None
-    moved_into_central = False
 
     try:
         clone = run_git(
@@ -232,7 +231,6 @@ def main(argv: list[str]) -> None:
 
         try:
             os.replace(skill_dir_in_clone, central)
-            moved_into_central = True
         except OSError as e:
             if backup_dir is not None:
                 try:
