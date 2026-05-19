@@ -70,17 +70,17 @@ Example for a Chinese response:
 
 | Skill名称 | 类型 | 功能描述 | 状态 |
 |---|---|---|---|
-| brainstorming | Git | ... | 🟢最新 / 🔴过期 |
-| my-private | 本地 | ... | 🟢最新 |
-| unknown-thing | 未知 | ... | 🟡未知 |
+| brainstorming | Git | ... | 🟢 最新 / 🔴 过期 |
+| my-private | 本地 | ... | 🟢 最新 |
+| unknown-thing | 未知 | ... | 🟡 未知 |
 
 Example for an English response:
 
 | Skill name | Type | Description | Status |
 |---|---|---|---|
-| brainstorming | Git | ... | 🟢Latest / 🔴Outdated |
-| my-private | Local | ... | 🟢Latest |
-| unknown-thing | Unknown | ... | 🟡Unknown |
+| brainstorming | Git | ... | 🟢 Latest / 🔴 Outdated |
+| my-private | Local | ... | 🟢 Latest |
+| unknown-thing | Unknown | ... | 🟡 Unknown |
 
 Output contract: always render all four semantic columns. Do not omit the
 description column to make the answer shorter, even on repeat list requests,
@@ -89,12 +89,24 @@ inventory JSON `description` field as the source of the description, but choose
 whether to keep it as written, translate it, or summarize it according to the
 user's response language.
 
+Status indicator contract:
+- The status column must include one of these exact visual indicators:
+  `🟢` for current, `🔴` for outdated, or `🟡` for unknown.
+- These symbols are semantic status markers required by this skill's output
+  contract, not decorative emoji. They intentionally override generic style
+  rules such as "avoid emoji" for this table's status column only.
+- If the runtime, terminal, or user explicitly forbids emoji display, fall back
+  to text labels: `[latest]`, `[outdated]`, `[unknown]` (localized to the
+  user's response language).
+
 Display mappings:
 - Type: `remote` → `Git`; `local` → localized "local"; `unclaimed` →
   localized "unknown".
-- Status: `up_to_date` → localized "🟢latest"; `update_available` →
-  localized "🔴outdated"; `local` → localized "🟢latest"; `unclaimed` /
-  `unknown` / `error` / `null` → localized "🟡unknown".
+- Status:
+  - `up_to_date` → localized "🟢 latest"
+  - `update_available` → localized "🔴 outdated"
+  - `local` → localized "🟢 latest"
+  - `unclaimed` / `unknown` / `error` / `null` → localized "🟡 unknown"
 
 After the table, summarize in the user's response language, for example in
 Chinese: "共 X 个，最新 Y 个，过期 Z 个，本地 W 个，未知 V 个"; or in English:
