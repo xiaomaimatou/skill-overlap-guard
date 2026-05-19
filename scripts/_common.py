@@ -224,6 +224,24 @@ def split_owner_repo(url: str) -> tuple[str, str] | None:
     return parts[0], parts[1]
 
 
+def normalize_github_repo_url(url: str) -> str | None:
+    """Normalize supported GitHub repo URLs to https://github.com/<owner>/<repo>."""
+    s = (url or "").strip().removesuffix(".git").rstrip("/")
+    if s.startswith("git@github.com:"):
+        rest = s[len("git@github.com:"):]
+        parts = rest.split("/", 1)
+        if len(parts) != 2 or not all(parts):
+            return None
+        return f"https://github.com/{parts[0]}/{parts[1]}"
+    if s.startswith("https://github.com/") or s.startswith("http://github.com/"):
+        parsed = split_owner_repo(s)
+        if not parsed:
+            return None
+        owner, repo = parsed
+        return f"https://github.com/{owner}/{repo.removesuffix('.git')}"
+    return None
+
+
 def fetch_remote_skill_md(repo_url: str, branch: str, subpath: str,
                            timeout: int = 15) -> tuple[str, str | None]:
     """Fetch upstream SKILL.md text via raw.githubusercontent.com.

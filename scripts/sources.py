@@ -30,6 +30,7 @@ from _common import (
     emit_json,
     fetch_remote_skill_md,
     load_sources,
+    normalize_github_repo_url,
     save_sources,
     skills_root,
     validate_skill_name,
@@ -93,6 +94,12 @@ def cmd_claim_remote(args: argparse.Namespace) -> None:
     skill_dir = skills_root() / name
     if not skill_dir.is_dir():
         die(f"directory not found: {skill_dir}", code=2)
+    url = normalize_github_repo_url(args.url)
+    if url is None:
+        die(
+            f"unsupported remote URL {args.url!r}; only GitHub repo URLs are supported",
+            code=2,
+        )
     branch = args.branch or "main"
     subpath = args.subpath or ""
     if subpath:
@@ -115,14 +122,14 @@ def cmd_claim_remote(args: argparse.Namespace) -> None:
         # before recording a revision. If it doesn't, installed_revision is
         # set to null so update_skill / inventory correctly flag the skill
         # as needing re-alignment instead of silently claiming "up to date".
-        head_sha = resolve_remote_revision(args.url, branch)
+        head_sha = resolve_remote_revision(url, branch)
         local_md = skill_dir / "SKILL.md"
         if not local_md.is_file():
             local_md = skill_dir / "skill.md"
         if not local_md.is_file():
             die(f"{name!r} has no SKILL.md to verify against upstream", code=2)
         local_text = normalize(local_md.read_text(encoding="utf-8", errors="replace"))
-        remote_text, err = fetch_remote_skill_md(args.url, branch, subpath)
+        remote_text, err = fetch_remote_skill_md(url, branch, subpath)
         if err:
             revision = None
             verify_note = f"could not fetch upstream SKILL.md: {err}; recorded installed_revision=null"
@@ -140,7 +147,7 @@ def cmd_claim_remote(args: argparse.Namespace) -> None:
 
     data = load_sources()
     data["skills"][name] = {
-        "url": args.url,
+        "url": url,
         "branch": branch,
         "subpath": subpath,
         "installed_revision": revision,
@@ -148,7 +155,7 @@ def cmd_claim_remote(args: argparse.Namespace) -> None:
     save_sources(data)
     payload = {
         "claimed_remote": name,
-        "url": args.url,
+        "url": url,
         "branch": branch,
         "subpath": subpath,
         "installed_revision": revision,

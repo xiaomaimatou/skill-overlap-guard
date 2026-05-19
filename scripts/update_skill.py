@@ -37,12 +37,13 @@ from _common import (
     run_git,
     safe_resolve_subpath,
     save_sources,
+    skills_manager_root,
     skills_root,
     tmp_root,
     validate_skill_name,
 )
 
-REQUIRED_FIELDS = ("url", "branch", "subpath")
+REQUIRED_VALUE_FIELDS = ("url", "branch")
 
 
 def main(argv: list[str]) -> None:
@@ -53,6 +54,8 @@ def main(argv: list[str]) -> None:
     args = parser.parse_args(argv[1:])
 
     name = validate_skill_name(args.name)
+    if name == skills_manager_root().name:
+        die("refusing to update skills-manager itself", code=2)
 
     data = load_sources()
     rec = data["skills"].get(name)
@@ -60,7 +63,9 @@ def main(argv: list[str]) -> None:
         die(f"{name!r} is not in sources.json. Run sources.py claim-remote first.", code=2)
     if not rec.get("url"):
         die(f"{name!r} is a local skill, nothing to update.", code=2)
-    missing = [f for f in REQUIRED_FIELDS if not rec.get(f)]
+    missing = [f for f in REQUIRED_VALUE_FIELDS if not rec.get(f)]
+    if "subpath" not in rec:
+        missing.append("subpath")
     if missing:
         die(
             f"{name!r} record is incomplete (missing: {', '.join(missing)}). "
@@ -133,7 +138,20 @@ def main(argv: list[str]) -> None:
         rec["installed_revision"] = new_revision
         rec.pop("installed_content_hash", None)
         data["skills"][name] = rec
-        save_sources(data)
+        try:
+            save_sources(data)
+        except Exception as e:
+            try:
+                cleanup_dir(central)
+                os.replace(backup_dir, central)
+            except OSError as e2:
+                die(
+                    f"sources.json write failed AND rollback failed. "
+                    f"New skill files are at {central}; backup is at {backup_dir}. "
+                    f"sources_error={e} rollback_error={e2}",
+                    code=5,
+                )
+            die(f"sources.json write failed (filesystem rolled back): {e}", code=5)
 
         emit_json({
             "skill": name,

@@ -52,6 +52,7 @@ from _common import (
     run_git,
     safe_resolve_subpath,
     save_sources,
+    skills_manager_root,
     skills_root,
     tmp_root,
     validate_skill_name,
@@ -163,6 +164,8 @@ def main(argv: list[str]) -> None:
     p.add_argument("--branch", default=None,
                    help="Override branch (useful for branch names containing '/')")
     args = p.parse_args(argv[1:])
+    if args.name and validate_skill_name(args.name) == skills_manager_root().name:
+        die("refusing to install or replace skills-manager itself", code=2)
 
     parsed = parse_github_url(args.url)
     repo_url = parsed["repo_url"]
@@ -209,6 +212,8 @@ def main(argv: list[str]) -> None:
                 code=2,
             )
         name = validate_skill_name(name)
+        if name == skills_manager_root().name:
+            die("refusing to install or replace skills-manager itself", code=2)
 
         rev = run_git(["rev-parse", "HEAD"], cwd=clone_root)
         if rev.returncode != 0:

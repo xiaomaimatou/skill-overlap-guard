@@ -31,9 +31,10 @@ Output (stdout, JSON):
       "inventory_after": [ {inventory entry}, ... ] | null
     }
 
-Per-skill reports with `decision in {needs_review, no_match}` also include a
-`search_query_hint` field (string or null). When the script cannot resolve a
-skill on its own, callers can feed this phrase into agent-driven WebSearch.
+Per-skill unresolved reports (`needs_review`, `no_match`, or
+`git_remote_unsupported`) also include a `search_query_hint` field (string or
+null). When the script cannot resolve a skill on its own, callers can feed this
+phrase into agent-driven WebSearch.
 
 Exit codes:
     0  finished (regardless of how many auto-claims happened)
@@ -355,7 +356,7 @@ def run_audit(dry_run: bool = False) -> dict:
             continue
 
         rep = audit_one(child.name, child)
-        if rep["decision"] in ("needs_review", "no_match"):
+        if rep["decision"] in ("needs_review", "no_match", "git_remote_unsupported"):
             rep["search_query_hint"] = query_hint_for(child)
         reports.append(rep)
         if rep["decision"] == "auto_claim" and not dry_run:

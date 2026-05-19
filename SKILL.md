@@ -113,12 +113,12 @@ Chinese: "共 X 个，最新 Y 个，过期 Z 个，本地 W 个，未知 V 个"
 "Total X, latest Y, outdated Z, local W, unknown V." If `audit.ran` is true,
 also summarize how many were auto-claimed, need review, or had no match.
 
-If `audit.ran` is true and any report has `decision: "no_match"` or
-`decision: "needs_review"`, do **not** stop after explaining that the script
-does not run WebSearch. Continue immediately into Scenario E's WebSearch
-handoff in the same turn, unless the user explicitly said "just list", "no
-audit", "preview only", "do not search", or "no network". The intended default
-for list/check requests is:
+If `audit.ran` is true and any report has `decision: "no_match"`,
+`decision: "needs_review"`, or `decision: "git_remote_unsupported"`, do **not**
+stop after explaining that the script does not run WebSearch. Continue
+immediately into Scenario E's WebSearch handoff in the same turn, unless the
+user explicitly said "just list", "no audit", "preview only", "do not search",
+or "no network". The intended default for list/check requests is:
 
 ```text
 inventory --check-remote --audit-unclaimed

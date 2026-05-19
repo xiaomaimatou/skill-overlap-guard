@@ -74,6 +74,27 @@ class SkillManagerContractTests(unittest.TestCase):
         ).stdout.strip()
         return repo, sha
 
+    def make_root_remote_repo(self, skill_name: str = "root-skill") -> tuple[Path, str]:
+        repo = self.root / "root-remote-repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+        (repo / "SKILL.md").write_text(
+            f"---\nname: {skill_name}\ndescription: Remote root skill\n---\n\n# Remote root\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True, text=True)
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        return repo, sha
+
     def test_inventory_marks_local_status_as_local(self) -> None:
         self.write_skill("private-skill")
         self.write_sources({"private-skill": {}})
@@ -187,7 +208,7 @@ class SkillManagerContractTests(unittest.TestCase):
             "claim-remote",
             "git-skill",
             "--url",
-            "https://example.com/repo.git",
+            "https://github.com/example/repo.git",
             "--branch",
             "main",
             "--subpath",
@@ -249,6 +270,87 @@ class SkillManagerContractTests(unittest.TestCase):
         self.assertEqual(payload["new_revision"], sha)
         self.assertEqual(sources["skills"]["git-skill"]["installed_revision"], sha)
 
+    def test_update_skill_accepts_repo_root_subpath(self) -> None:
+        remote, sha = self.make_root_remote_repo("root-skill")
+        self.write_skill("root-skill", "Old local copy")
+        self.write_sources({
+            "root-skill": {
+                "url": str(remote),
+                "branch": "main",
+                "subpath": "",
+                "installed_revision": "old-sha",
+            }
+        })
+
+        result = self.run_script("update_skill.py", "root-skill")
+        payload = json.loads(result.stdout)
+        sources = json.loads((self.manager / "sources.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(payload["updated"])
+        self.assertEqual(payload["new_revision"], sha)
+        self.assertEqual(sources["skills"]["root-skill"]["installed_revision"], sha)
+        self.assertIn("Remote root skill", (self.skills_root / "root-skill" / "SKILL.md").read_text(encoding="utf-8"))
+
+    def test_update_skill_rolls_back_files_when_sources_write_fails(self) -> None:
+        remote, _sha = self.make_remote_repo("git-skill")
+        self.write_skill("git-skill", "Old local copy")
+        self.write_sources({
+            "git-skill": {
+                "url": str(remote),
+                "branch": "main",
+                "subpath": "skills/git-skill",
+                "installed_revision": "old-sha",
+            }
+        })
+
+        for cached in ("_common", "update_skill_under_test"):
+            sys.modules.pop(cached, None)
+        sys.path.insert(0, str(self.manager / "scripts"))
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "update_skill_under_test",
+                self.manager / "scripts" / "update_skill.py",
+            )
+            assert spec and spec.loader
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+            def _fail_save(_data):
+                raise OSError("simulated sources write failure")
+
+            mod.save_sources = _fail_save
+            cwd = os.getcwd()
+            os.chdir(self.manager)
+            try:
+                with self.assertRaises(SystemExit) as cm:
+                    mod.main(["update_skill.py", "git-skill"])
+            finally:
+                os.chdir(cwd)
+        finally:
+            sys.path.pop(0)
+            for cached in ("_common", "update_skill_under_test"):
+                sys.modules.pop(cached, None)
+
+        self.assertEqual(cm.exception.code, 5)
+        restored = (self.skills_root / "git-skill" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Old local copy", restored)
+
+    def test_update_skill_refuses_to_replace_skills_manager_itself(self) -> None:
+        remote, _sha = self.make_remote_repo("git-skill")
+        self.write_sources({
+            "skills-manager": {
+                "url": str(remote),
+                "branch": "main",
+                "subpath": "skills/git-skill",
+                "installed_revision": "old-sha",
+            }
+        })
+
+        result = self.run_script("update_skill.py", "skills-manager", check=False)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue((self.manager / "scripts" / "update_skill.py").is_file())
+
     def test_common_no_longer_exposes_hash_directory(self) -> None:
         spec = importlib.util.spec_from_file_location("_common_under_test", self.manager / "scripts" / "_common.py")
         assert spec and spec.loader
@@ -297,7 +399,7 @@ class VersionAlignmentTests(SkillManagerContractTests):
             try:
                 sources_mod.main([
                     "sources.py", "claim-remote", "aligned",
-                    "--url", str(remote), "--branch", "main",
+                    "--url", "https://github.com/example/aligned", "--branch", "main",
                     "--subpath", "skills/aligned",
                 ])
                 payload = json.loads(sys.stdout.getvalue())
@@ -350,6 +452,30 @@ class VersionAlignmentTests(SkillManagerContractTests):
         self.assertIn("differs", payload["verify_note"])
         sources = json.loads((self.manager / "sources.json").read_text(encoding="utf-8"))
         self.assertIsNone(sources["skills"]["drift"]["installed_revision"])
+
+    def test_claim_remote_rejects_non_github_urls_even_without_resolve(self) -> None:
+        self.write_skill("gitlab-skill")
+        self.write_sources({})
+
+        result = self.run_script(
+            "sources.py",
+            "claim-remote",
+            "gitlab-skill",
+            "--url",
+            "https://gitlab.com/example/gitlab-skill",
+            "--branch",
+            "main",
+            "--subpath",
+            "skills/gitlab-skill",
+            "--no-resolve",
+            "--assume-revision",
+            "abc123",
+            check=False,
+        )
+        sources = json.loads((self.manager / "sources.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("gitlab-skill", sources["skills"])
 
     def test_inventory_treats_null_revision_as_update_available(self) -> None:
         """Once a remote claim has null installed_revision, inventory must
@@ -503,6 +629,21 @@ class InstallSkillTests(SkillManagerContractTests):
         self.assertIn("old description", (backup / "SKILL.md").read_text(encoding="utf-8"))
         self.assertIn("Remote skill", (self.skills_root / "git-skill" / "SKILL.md").read_text(encoding="utf-8"))
 
+    def test_install_refuses_to_replace_skills_manager_itself(self) -> None:
+        remote, _sha = self.make_remote_repo("git-skill")
+        self.write_sources({})
+
+        cwd = os.getcwd()
+        os.chdir(self.manager)
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                self._run_install_inproc(remote, extra_args=["--name", "skills-manager"])
+        finally:
+            os.chdir(cwd)
+
+        self.assertEqual(cm.exception.code, 2)
+        self.assertTrue((self.manager / "scripts" / "install_skill.py").is_file())
+
 
 class AuditUnclaimedTests(SkillManagerContractTests):
     """Audit script: .git detection + embedded source URL verification."""
@@ -593,7 +734,12 @@ class AuditUnclaimedTests(SkillManagerContractTests):
     def test_git_dir_with_non_github_remote_is_unsupported(self) -> None:
         skill_dir = self.skills_root / "gitlab-skill"
         skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text("---\nname: gitlab-skill\ndescription: x\n---\n", encoding="utf-8")
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: gitlab-skill\n"
+            "description: Distinctive unsupported git remote skill should continue into WebSearch.\n"
+            "---\n",
+            encoding="utf-8",
+        )
         subprocess.run(["git", "init", "-b", "main"], cwd=skill_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=skill_dir, check=True)
         subprocess.run(["git", "config", "user.name", "T"], cwd=skill_dir, check=True)
@@ -610,6 +756,9 @@ class AuditUnclaimedTests(SkillManagerContractTests):
         sources = json.loads((self.manager / "sources.json").read_text(encoding="utf-8"))
         self.assertNotIn("gitlab-skill", sources["skills"])
         self.assertEqual(payload["summary"]["git_remote_unsupported"], 1)
+        rep = next(r for r in payload["reports"] if r["name"] == "gitlab-skill")
+        self.assertEqual(rep["decision"], "git_remote_unsupported")
+        self.assertIsInstance(rep.get("search_query_hint"), str)
 
     def test_embedded_github_url_auto_claims(self) -> None:
         upstream_text = "---\nname: embedded\ndescription: traced from body\n---\n\n# Embedded\n\nbody body.\n"
