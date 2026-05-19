@@ -37,6 +37,11 @@ installation).
 Triggers: "list my skills", "what skills do I have", "show skills", "which
 skills are outdated", "check for updates".
 
+Interpret "all my skills" / "我的所有 skill" as all sibling skill directories
+under this skills-manager installation's parent directory. Do not expand that
+to every programming tool's skills (Cursor, Codex, Claude, etc.) unless the user
+explicitly asks for a cross-tool inventory.
+
 Run full inventory by default. This keeps the list command ergonomic: if the
 first cheap scan finds unclaimed skills, inventory runs the source audit once,
 writes high-confidence claims, and returns the final post-audit table data.
@@ -56,29 +61,63 @@ Output shapes:
 - Without `--audit-unclaimed`: JSON array of inventory entries.
 - With `--audit-unclaimed`: JSON object `{ "entries": [...], "audit": {...} }`.
 
-Parse `entries` (or the bare array for read-only output) and render as a Chinese
-markdown table:
+Parse `entries` (or the bare array for read-only output) and render as a
+markdown table with exactly four semantic columns: skill name, type,
+description, and status. Localize the column labels to the user's response
+language instead of forcing Chinese.
+
+Example for a Chinese response:
 
 | Skill名称 | 类型 | 功能描述 | 状态 |
 |---|---|---|---|
-| brainstorming | Git | ... | 最新 / 过期 |
-| my-private | 本地 | ... | 本地 |
-| unknown-thing | 未知 | ... | 未知 |
+| brainstorming | Git | ... | 🟢最新 / 🔴过期 |
+| my-private | 本地 | ... | 🟢最新 |
+| unknown-thing | 未知 | ... | 🟡未知 |
 
-Output contract: always render all four columns exactly: `Skill名称`, `类型`,
-`功能描述`, `状态`. Do not omit `功能描述` to make the answer shorter, even on
-repeat list requests, after source-audit follow-ups, or when every skill has a
-known source. Use the inventory JSON `description` field for `功能描述`.
+Example for an English response:
+
+| Skill name | Type | Description | Status |
+|---|---|---|---|
+| brainstorming | Git | ... | 🟢Latest / 🔴Outdated |
+| my-private | Local | ... | 🟢Latest |
+| unknown-thing | Unknown | ... | 🟡Unknown |
+
+Output contract: always render all four semantic columns. Do not omit the
+description column to make the answer shorter, even on repeat list requests,
+after source-audit follow-ups, or when every skill has a known source. Use the
+inventory JSON `description` field as the source of the description, but choose
+whether to keep it as written, translate it, or summarize it according to the
+user's response language.
 
 Display mappings:
-- Type: `remote` → `Git`; `local` → `本地`; `unclaimed` → `未知`.
-- Status: `up_to_date` → `最新`; `update_available` → `过期`;
-  `local` → `本地`; `unclaimed` / `unknown` / `error` / `null` → `未知`.
+- Type: `remote` → `Git`; `local` → localized "local"; `unclaimed` →
+  localized "unknown".
+- Status: `up_to_date` → localized "🟢latest"; `update_available` →
+  localized "🔴outdated"; `local` → localized "🟢latest"; `unclaimed` /
+  `unknown` / `error` / `null` → localized "🟡unknown".
 
-After the table, summarize in Chinese: "共 X 个，最新 Y 个，过期 Z 个，本地
-W 个，未知 V 个". If `audit.ran` is true, also summarize how many were
-auto-claimed, need review, or had no match. Offer next steps: "要更新过期项吗？
-要处理需确认/未识别的来源吗？"
+After the table, summarize in the user's response language, for example in
+Chinese: "共 X 个，最新 Y 个，过期 Z 个，本地 W 个，未知 V 个"; or in English:
+"Total X, latest Y, outdated Z, local W, unknown V." If `audit.ran` is true,
+also summarize how many were auto-claimed, need review, or had no match.
+
+If `audit.ran` is true and any report has `decision: "no_match"` or
+`decision: "needs_review"`, do **not** stop after explaining that the script
+does not run WebSearch. Continue immediately into Scenario E's WebSearch
+handoff in the same turn, unless the user explicitly said "just list", "no
+audit", "preview only", "do not search", or "no network". The intended default
+for list/check requests is:
+
+```text
+inventory --check-remote --audit-unclaimed
+→ auto-claim .git/config / embedded GitHub URL evidence
+→ agent WebSearch for remaining unknown/needs_review skills
+→ sources.py claim-remote / claim-local for clear decisions
+→ final table + concise summary
+```
+
+Do not offer "要处理未识别来源吗？" as the stopping point when unresolved reports
+already include `search_query_hint`; use those hints now.
 
 If the user later asks something like "just show me the ones with updates",
 re-filter the same JSON output — do **not** re-run inventory.
@@ -203,6 +242,8 @@ Confidence rules:
     `update_available` and `update_skill.py` can re-align it.
 - WebSearch:
   - The script does not run WebSearch itself.
+  - The agent **must** run WebSearch itself for unresolved audit reports during
+    Scenario A / Scenario E, unless the user explicitly opted out of search.
   - Agent search results are evidence for source identity, not automatic claims.
   - Once source identity is clear, run `sources.py claim-remote` or
     `sources.py claim-local`.
@@ -214,7 +255,9 @@ upstream HEAD and writes the now-correct `installed_revision`. This is the
 self-healing path: claim makes a conservative record, update aligns it.
 
 **WebSearch handoff.** Every unresolved report carries a `search_query_hint`
-when the local description is long enough. Search with combinations such as:
+when the local description is long enough. This is a mandatory continuation
+step for the agent, not a note to pass back to the user. Search with
+combinations such as:
 
 ```text
 <skill-name> SKILL.md GitHub
@@ -233,14 +276,19 @@ When reviewing WebSearch results:
    candidate's url/branch/subpath. If multiple candidates still look plausible,
    ask the user instead of guessing.
 
+When many skills remain unresolved, process them in a compact batch: search the
+strongest query for each skill, record clear matches immediately, and ask the
+user only about ambiguous or user-authored-looking skills. Do not final-answer
+with only "these need WebSearch" when WebSearch is available to the agent.
+
 Output is a JSON `{summary, reports, inventory_after}` payload. Render to the
 user as:
 - **"已自动登记 K 个"** — show each (name → repo+subpath, source: git_dir /
   embedded_url). These were trusted/explicit matches.
-- **"未识别 M 个"** — for each, use `search_query_hint` to run WebSearch (or
-  ask the user directly). Once you have a source, **agent runs
-  `sources.py claim-remote`** (if from GitHub) or `sources.py claim-local`
-  (if user-authored). Do not re-run audit expecting WebSearch to write records.
+- **"未识别 M 个"** — before finalizing, use `search_query_hint` to run
+  WebSearch. Once you have a source, **agent runs `sources.py claim-remote`**
+  (if from GitHub) or `sources.py claim-local` (if user-authored). Do not re-run
+  audit expecting WebSearch to write records.
 - Then re-render the Scenario A table from `inventory_after` so the user sees
   the new state in one shot — no need to invoke `inventory.py` separately.
   (`inventory_after` is `null` when `--dry-run` is used, because sources.json
@@ -263,12 +311,10 @@ For each unclaimed skill, in order:
 
 1. **Read its SKILL.md** (first ~60 lines). Note name + description + style.
 
-2. **Search GitHub**. Try in this order:
-   - If `gh` CLI is installed:
-     ```powershell
-     gh api -X GET search/code -f q='filename:SKILL.md "<distinctive phrase from description>"'
-     ```
-   - Otherwise use `WebSearch` for `"<skill name>" SKILL.md github`.
+2. **Search the web** using the agent's联网搜索/WebSearch capability. Start
+   with `"<skill name>" SKILL.md github`, the local title, and any distinctive
+   phrase from the description. Prefer GitHub source pages and official docs
+   over registries, dotfiles, mirrors, and marketplace copies.
 
 3. **Compare**. For top 1–3 candidates, fetch the raw SKILL.md (use `WebFetch`
    or `curl`), save to `<skills-manager>/.tmp/<uuid>-candidate.md`, then:
