@@ -70,7 +70,7 @@ Codex 自然语言安装检查：
 
 ![安装示例 1](./example1.png)
 
-Terminal `npx skills add` 安装检查：
+Codex 自然语言安装检查：
 
 ![安装示例 2](./example2.png)
 

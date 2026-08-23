@@ -72,7 +72,7 @@ Codex natural-language check:
 
 ![Installation example 1](./example1.png)
 
-Terminal `npx skills add` check:
+Codex natural-language check:
 
 ![Installation example 2](./example2.png)
 
