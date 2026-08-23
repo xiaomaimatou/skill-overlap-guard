@@ -2,41 +2,39 @@
 
 Skill 防重助手
 
+面向 Agent Skill 的安装前功能查重工具。
+
 **安装前先查重，避免 Skill 越装越重复。**
 
 Check before you install. Avoid redundant Agent Skills.
 
 ## Why
 
-Skill 越装越多，很难知道新 Skill 是否已经被现有能力覆盖。
+Skill 越装越多，越难判断新 Skill 是否已经覆盖已有能力。
 
 ## What it does
 
-- 安装前功能查重
-- 存量 Skill overlap audit
-- `HIGH` / `partial` / `complementary` 判断
-- 中英文语义匹配
-- Codex 自然语言安装前检查
-- Terminal `npx skills add` Guard
-- Decision Registry
+- 安装前检查 Skill 能力重叠
+- 审计存量 Skill 的 overlap
+- 判断 `HIGH`、`partial`、`complementary` 关系
+- 匹配中英文能力描述
+- 守护 Codex 和 Terminal 安装流程
+- 记录用户明确决定的 Decision Registry
 
 ## Safety
 
-- 不自动删除
-- 不自动合并
-- 不自动替换
-- 不自动禁用
+- 不自动删除、合并、替换或禁用 Skill
 - 修改存量 Skill 必须用户明确授权
 
 ## Install
 
-将仓库克隆到 Agent Skills 根目录：
+克隆到 Agent Skills 根目录：
 
 ```bash
 git clone https://github.com/EfanWang/skill-overlap-guard.git
 ```
 
-运行环境：Python 3.9+，并确保 `git` 在 PATH 中。
+要求 Python 3.9+，并确保 `git` 在 PATH 中。
 
 ## Usage
 
@@ -66,6 +64,16 @@ python scripts/terminal_guard.py status
 python scripts/terminal_guard.py disable
 ```
 
+### 示例
+
+Codex 自然语言安装检查：
+
+![安装示例 1](./example1.png)
+
+Terminal `npx skills add` 安装检查：
+
+![安装示例 2](./example2.png)
+
 ## How it works
 
 ```text
@@ -77,7 +85,7 @@ Source
   → User Confirmation
 ```
 
-v0.1 只报告重叠结果；未经用户明确确认，不会安装 Skill。
+v0.1 只报告重叠结果。未经用户明确确认，不会安装 Skill。
 
 ## Status
 

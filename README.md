@@ -2,42 +2,40 @@
 
 Skill 防重助手
 
+Pre-install overlap checks for Agent Skills.
+
 **Check before you install. Avoid redundant Agent Skills.**
 
 安装前先查重，避免 Skill 越装越重复。
 
 ## Why
 
-As your Skill collection grows, it becomes difficult to know whether a new
-Skill duplicates capabilities you already have.
+As your Skill collection grows, it becomes harder to know whether a new Skill
+duplicates an existing capability.
 
 ## What it does
 
-- Pre-install capability overlap checks
-- Overlap audits for installed Skills
-- `HIGH` / `partial` / `complementary` judgments
-- Chinese-English semantic matching
-- Codex natural-language install checks
-- Terminal `npx skills add` Guard
-- Decision Registry for explicit user decisions
+- Check a Skill before installation
+- Audit overlap across installed Skills
+- Classify `HIGH`, `partial`, and `complementary` relationships
+- Match Chinese and English capability descriptions
+- Guard Codex and terminal install flows
+- Record explicit decisions in a Decision Registry
 
 ## Safety
 
-- Does not automatically delete Skills
-- Does not automatically merge Skills
-- Does not automatically replace Skills
-- Does not automatically disable Skills
+- Never deletes, merges, replaces, or disables Skills automatically
 - Changes to installed Skills require explicit user authorization
 
 ## Install
 
-Clone the repository into an Agent Skills root:
+Clone into an Agent Skills root:
 
 ```bash
 git clone https://github.com/EfanWang/skill-overlap-guard.git
 ```
 
-Runtime requirements: Python 3.9+ and `git`.
+Requires Python 3.9+ and `git`.
 
 ## Usage
 
@@ -68,6 +66,16 @@ python scripts/terminal_guard.py status
 python scripts/terminal_guard.py disable
 ```
 
+### Examples
+
+Codex natural-language check:
+
+![Installation example 1](./example1.png)
+
+Terminal `npx skills add` check:
+
+![Installation example 2](./example2.png)
+
 ## How it works
 
 ```text
@@ -79,7 +87,7 @@ Source
   → User Confirmation
 ```
 
-The v0.1 workflow reports overlap and never installs a Skill before explicit
+v0.1 reports overlap only. It never installs a Skill before explicit
 confirmation.
 
 ## Status
