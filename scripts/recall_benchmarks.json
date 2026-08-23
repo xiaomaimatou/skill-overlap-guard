@@ -1,0 +1,10 @@
+{
+  "known_positive_pairs": [
+    ["ui-styling", "ui-ux-pro-max"],
+    ["space-xhs-title", "baokuan-title-generator"]
+  ],
+  "known_negative_pairs": [
+    ["agent-reach", "space-video"],
+    ["brand", "design-system"]
+  ]
+}

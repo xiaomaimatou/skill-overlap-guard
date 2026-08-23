@@ -29,6 +29,7 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -41,6 +42,79 @@ from _common import (
     skills_root,
 )
 from check_remote import fetch_remote_sha
+
+
+EXCLUDED_DIRECTORY_NAMES = {".system", ".backup", ".tmp", "cache", "caches"}
+
+
+def inventory_scope(root: Path) -> str:
+    """Return a stable label for a configured skills root."""
+    parts = root.parts
+    if ".agents" in parts:
+        return "project" if root.parent.name == ".agents" else "agents"
+    if ".codex" in parts:
+        return "codex"
+    if root.parent.name == "agents":
+        return "agents"
+    if root.parent.name == "codex":
+        return "codex"
+    return "custom"
+
+
+def is_excluded_skill_path(path: Path, root: Path) -> bool:
+    """Keep protected, generated, and temporary directories out of governance."""
+    return any(part in EXCLUDED_DIRECTORY_NAMES for part in path.relative_to(root).parts)
+
+
+def skill_content_hash(skill_md: Path) -> str:
+    return "sha256:" + hashlib.sha256(skill_md.read_bytes()).hexdigest()
+
+
+def discover_skills(roots: list[Path]) -> list[dict]:
+    """Recursively discover SKILL.md files under the configured roots.
+
+    The returned records intentionally do not consult sources.json. That keeps
+    discovery read-only and reusable by audit and pre-install checks.
+    """
+    records: list[dict] = []
+    records_by_dir: dict[Path, dict] = {}
+
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for skill_md in sorted(root.rglob("SKILL.md")):
+            skill_dir = skill_md.parent
+            if is_excluded_skill_path(skill_dir, root):
+                continue
+            has_md, frontmatter = read_skill_md(skill_dir)
+            if not has_md:
+                continue
+            name = frontmatter.get("name", "").strip() or skill_dir.name
+            record = {
+                "name": name,
+                "description": frontmatter.get("description", ""),
+                "path": str(skill_dir),
+                "scope": inventory_scope(root),
+                "parent_skill": None,
+                "children": [],
+                "content_hash": skill_content_hash(skill_md),
+            }
+            records.append(record)
+            records_by_dir[skill_dir.resolve()] = record
+
+    for skill_dir, record in records_by_dir.items():
+        parent_dir = skill_dir.parent
+        while parent_dir in records_by_dir or parent_dir.parent != parent_dir:
+            parent = records_by_dir.get(parent_dir)
+            if parent is not None:
+                record["parent_skill"] = parent["name"]
+                parent["children"].append(record["name"])
+                break
+            parent_dir = parent_dir.parent
+
+    for record in records:
+        record["children"].sort()
+    return sorted(records, key=lambda item: (item["scope"], item["path"]))
 
 
 def classify(rec: dict | None) -> str:

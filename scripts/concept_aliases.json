@@ -1,0 +1,46 @@
+{
+  "title-generation": {
+    "aliases": ["标题生成", "爆款标题", "起标题", "headline generation", "title generation", "headline generator", "title generator"],
+    "broad": false
+  },
+  "frontend-visual-refinement": {
+    "aliases": ["前端视觉优化", "视觉优化", "frontend visual refinement", "visual refinement", "visual optimization"],
+    "broad": false
+  },
+  "content-search": {
+    "aliases": ["内容检索", "内容搜索", "content search", "content retrieval"],
+    "broad": false
+  },
+  "subtitle-production": {
+    "aliases": ["字幕", "转写", "subtitle", "caption", "transcription"],
+    "broad": false
+  },
+  "brand-identity": {
+    "aliases": ["品牌", "品牌识别", "brand identity", "branding"],
+    "broad": false
+  },
+  "design-system": {
+    "aliases": ["设计系统", "设计令牌", "design system", "design tokens"],
+    "broad": false
+  },
+  "video-script": {
+    "aliases": ["口播脚本", "分镜脚本", "video script", "scripting"],
+    "broad": false
+  },
+  "cover-design": {
+    "aliases": ["封面", "缩略图", "cover design", "thumbnail"],
+    "broad": false
+  },
+  "design-work": {
+    "aliases": ["design", "设计"],
+    "broad": true
+  },
+  "search-work": {
+    "aliases": ["search", "检索"],
+    "broad": true
+  },
+  "video-work": {
+    "aliases": ["video", "视频"],
+    "broad": true
+  }
+}

@@ -1,21 +1,21 @@
 ---
-name: skills-manager
+name: skill-overlap-guard
 description: >-
-  List, check, update, install, delete, and claim installed skills in the current
-  sibling skills directory for Claude Code, Cursor, or Codex CLI. Use when the
-  user asks what skills they have, which skills are outdated, to update or
-  refresh skills, install a GitHub skill, remove a skill, or trace a skill's
-  freshness, origin, or source.
+  Use when users want to List, check, update, install, delete, and claim installed skills
+  for Claude Code, Cursor, or Codex CLI; or want to add, inspect before installing,
+  compare, or check duplication for an Agent Skill from GitHub, a local path, Codex,
+  or npx skills add.
 ---
 
-# Skills Manager
+# Skill Overlap Guard
 
-Manage the **sibling skills** of this directory for one installed agent at a
-time. A single skills-manager instance scans only its own parent directory,
+Check and manage the **sibling skills** of this directory for one installed agent at a
+time. A single Skill Overlap Guard instance scans only its own parent directory,
 whether it is installed under a Claude Code, Cursor, or Codex CLI skills root.
 It does not aggregate skills across Claude Code, Cursor, and Codex CLI. Install
 a separate copy in each agent's skills root when the user wants separate
-per-agent inventories.
+per-agent inventories. The legacy single skills-manager instance boundary is
+preserved for compatibility.
 
 Supported installation roots include:
 - Claude Code: `~/.claude/skills/` or project `.claude/skills/`
@@ -43,7 +43,7 @@ Triggers: "list my skills", "what skills do I have", "show skills", "which
 skills are outdated", "check for updates".
 
 Interpret "all my skills" / "我的所有 skill" as all sibling skill directories
-under this skills-manager installation's parent directory. Do not expand that
+under this Skill Overlap Guard installation's parent directory. Do not expand that
 to every programming tool's skills (Claude Code, Cursor, Codex CLI, etc.)
 unless the user explicitly asks for a cross-tool inventory.
 
@@ -52,14 +52,14 @@ first cheap scan finds unclaimed skills, inventory runs the source audit once,
 writes high-confidence claims, and returns the final post-audit table data.
 
 ```powershell
-python <skills-manager>/scripts/inventory.py --check-remote --audit-unclaimed
+python <skill-overlap-guard>/scripts/inventory.py --check-remote --audit-unclaimed
 ```
 
 If the user explicitly says "preview only", "just list, don't write", or "no
 audit", use the read-only command instead:
 
 ```powershell
-python <skills-manager>/scripts/inventory.py --check-remote
+python <skill-overlap-guard>/scripts/inventory.py --check-remote
 ```
 
 Output shapes:
@@ -150,7 +150,7 @@ latest".
    action).
 3. For each, run:
    ```powershell
-   python <skills-manager>/scripts/update_skill.py <name>
+   python <skill-overlap-guard>/scripts/update_skill.py <name>
    ```
 4. Each successful update writes a backup under `.backup/<name>-<ts>-<uuid>/`.
    Report the backup path in your summary so the user can roll back manually.
@@ -158,39 +158,50 @@ latest".
 ### Scenario D: install a new skill from GitHub
 
 Triggers: "install X from <github url>", "add this skill: <url>", "下载这个
-skill: <url>", or any time the user hands over a GitHub URL and asks you to set
-it up locally.
+skill: <url>", `npx skills add`, or any time the user asks to add an Agent
+Skill from GitHub, a local path, or Codex.
 
-**Always go through `install_skill.py`. Do not `git clone` manually** — the
-script bundles cloning, atomic placement, and `sources.json` registration so
-the skill is correctly tracked from day one.
+**Always enter Skill Overlap Guard analysis first.** Resolve the source, build the
+candidate set against installed Skills, perform Semantic Review where needed,
+and present the Dedup Report. Never install before that check completes and the
+user explicitly confirms. In the current V0.1 phase, report the result only;
+do not invoke an installer.
+
+`$skill-overlap-guard` is the explicit fallback invocation when automatic
+routing is uncertain. The legacy `$skill-manager` alias remains accepted for
+compatibility.
+
+Source resolver contract: recognize a GitHub URL, `owner/repo`, local path,
+skill name, or the source argument to `npx skills add`. If no source is
+provided, return `dedup_status: blocked_pending_confirmation` with
+`reason: missing_source`; do not guess a repository.
+
+Report status only: `not_started`, `checking`, `clear`, `warning`, or
+`blocked_pending_confirmation`. HIGH / DUPLICATE requires the final status
+`blocked_pending_confirmation`; partial overlap is `warning`; a clear result
+is still analysis, not installation authorization. A future, separately
+approved phase may define an installation workflow. Do not `git clone` or run
+`install_skill.py` in this V0.1 stage.
+
+### Scenario D.1: explicit Terminal Dry-run Guard
+
+Terminal Guard is disabled by default. Terminal commands do not use Codex
+automatic skill routing. Users who want the
+same pre-install analysis for `npx skills add` can explicitly enable the
+reversible zsh wrapper:
 
 ```powershell
-python <skills-manager>/scripts/install_skill.py <github-url> [--name <override>]
+python <skill-overlap-guard>/scripts/terminal_guard.py enable
+python <skill-overlap-guard>/scripts/terminal_guard.py status
+python <skill-overlap-guard>/scripts/terminal_guard.py disable
 ```
 
-Accepted URL forms (the script normalizes all of these):
-- `https://github.com/<owner>/<repo>` (only valid if SKILL.md is at the repo root)
-- `https://github.com/<owner>/<repo>/tree/<branch>/<subpath>`
-- `https://github.com/<owner>/<repo>/blob/<branch>/<subpath>/SKILL.md`
-- `https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<subpath>/SKILL.md`
-- `git@github.com:<owner>/<repo>.git`
-
-Defaults and behavior worth knowing:
-- Skill name defaults to `name` in the upstream SKILL.md frontmatter. Pass
-  `--name` to override (useful when names collide).
-- Branch defaults to the repo's default branch (auto-detected via
-  `ls-remote --symref`). Pass `--branch` if the URL omits it AND the default
-  is wrong, or if the branch name contains `/`.
-- If a skill with the resolved name already exists, the existing copy is moved
-  to `.backup/<name>-<ts>-<uuid>/` before installing. Report this path back to
-  the user.
-- On any failure after the swap, the script tries to roll back. If rollback
-  also fails, it surfaces both error strings — pass them to the user verbatim.
-
-Confirm with the user before installing (destructive if it overwrites an
-existing skill). After success, summarize: name, source repo, installed
-revision, backup path (if any).
+The wrapper adds only a marked block to `.zshrc`. It passes ordinary `npx`
+commands through unchanged, but intercepts `npx skills add` (including `-y`,
+`-g`, and `-a codex` forms), resolves the source, and calls the same Candidate
+Recall / Semantic Review / Recommendation / Decision Context chain as Scenario
+D. It then stops. **Installation has NOT been executed.** `disable` removes
+the entire marked block and preserves the rest of `.zshrc`.
 
 ### Scenario C: delete a skill
 
@@ -202,11 +213,11 @@ This is destructive; do **not** automate it.
 2. Backup using PowerShell (same drive, atomic on Windows):
    ```powershell
    $ts = Get-Date -Format yyyyMMdd-HHmmss
-   Move-Item <skills_root>/<name> <skills-manager>/.backup/<name>-$ts
+   Move-Item <skills_root>/<name> <skill-overlap-guard>/.backup/<name>-$ts
    ```
 3. Remove the sources.json record (only if it had one):
    ```powershell
-   python <skills-manager>/scripts/sources.py remove <name>
+   python <skill-overlap-guard>/scripts/sources.py remove <name>
    ```
 4. Report success and the backup path.
 
@@ -232,8 +243,8 @@ and re-run). Treat audit like `update_skill.py`, not like `install_skill.py` or
 delete — no confirmation needed beforehand, just report results afterwards.
 
 ```powershell
-python <skills-manager>/scripts/audit_unclaimed.py            # collect evidence and auto-claim only trusted/explicit sources
-python <skills-manager>/scripts/audit_unclaimed.py --dry-run  # ONLY when user says "先看看不要动" / "preview only"
+python <skill-overlap-guard>/scripts/audit_unclaimed.py            # collect evidence and auto-claim only trusted/explicit sources
+python <skill-overlap-guard>/scripts/audit_unclaimed.py --dry-run  # ONLY when user says "先看看不要动" / "preview only"
 ```
 
 If you (agent) reflexively add `--dry-run` "to be safe", you'll surprise the
@@ -339,9 +350,9 @@ For each unclaimed skill, in order:
 
 3. **Compare**. For top 1–3 candidates, fetch the raw SKILL.md using the
    current agent's web fetch tool or `curl`, save it to
-   `<skills-manager>/.tmp/<uuid>-candidate.md`, then:
+   `<skill-overlap-guard>/.tmp/<uuid>-candidate.md`, then:
    ```powershell
-   python <skills-manager>/scripts/similarity.py <skills_root>/<skill>/SKILL.md <skills-manager>/.tmp/<uuid>-candidate.md
+   python <skill-overlap-guard>/scripts/similarity.py <skills_root>/<skill>/SKILL.md <skill-overlap-guard>/.tmp/<uuid>-candidate.md
    ```
 
 4. **Decide** based on `confidence`:
@@ -354,11 +365,11 @@ For each unclaimed skill, in order:
 5. **Register**. Once user confirms:
    ```powershell
    # From GitHub
-   python <skills-manager>/scripts/sources.py claim-remote <name> \
+   python <skill-overlap-guard>/scripts/sources.py claim-remote <name> \
        --url <repo-url> --branch <branch> --subpath <subpath-in-repo>
 
    # User-authored / private
-   python <skills-manager>/scripts/sources.py claim-local <name>
+   python <skill-overlap-guard>/scripts/sources.py claim-local <name>
    ```
 
    `claim-remote` fetches upstream SKILL.md and compares it to local before
