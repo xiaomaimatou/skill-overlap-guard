@@ -5,6 +5,7 @@ import re
 
 from decision_registry import DecisionRegistry
 from duplicate_scan import attach_decision_status, compare_profiles, select_semantic_candidates
+from preinstall_report import build_preinstall_report
 
 
 GITHUB_URL_RE = re.compile(r"https?://github\.com/([^/\s]+)/([^/\s#?]+)", re.IGNORECASE)
@@ -31,6 +32,7 @@ def build_dedup_context(
     threshold: float = 0.25, min_candidates: int = 5, max_candidates: int = 10,
     known_positive_pairs: list[tuple[str, str]] | list[list[str]] | None = None,
     registry: DecisionRegistry | None = None,
+    security: dict | None = None,
 ) -> dict:
     """Join a classified install request to the existing read-only dedup chain.
 
@@ -58,6 +60,9 @@ def build_dedup_context(
         known_positive_pairs=[] if known_positive_pairs is None else known_positive_pairs,
     )
     contextualized = attach_decision_status(candidates, registry or DecisionRegistry())
+    preinstall = build_preinstall_report(
+        request, candidate_profile, installed_profiles, security=security, source=request.get("source")
+    )
     return {
         **request,
         "semantic_review_queue": contextualized,
@@ -71,6 +76,7 @@ def build_dedup_context(
             for pair in contextualized
         ],
         "install_performed": False,
+        "preinstall_report": preinstall,
     }
 
 

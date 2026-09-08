@@ -14,6 +14,7 @@ from capability_parser import parse_capability_profile
 from inventory import discover_skills
 from invocation_contract import build_dedup_context, resolve_request
 from source_loader import load_candidate_profile
+from security_precheck import scan_skill_tree
 
 
 BEGIN_MARKER = "# BEGIN skill-manager terminal guard"
@@ -122,7 +123,8 @@ def _live_dry_run(args: list[str], skills_root: Path) -> dict:
     request = resolve_request(f"npx skills add {detected['source']}")
     try:
         candidate = load_candidate_profile(request["source"])
-        report = run_dry_run(args, candidate, _installed_profiles(skills_root))
+        security = scan_skill_tree(candidate["skill_dir"]) if candidate.get("skill_dir") else None
+        report = run_dry_run(args, candidate, _installed_profiles(skills_root), security=security)
     except (OSError, ValueError) as exc:
         report = {
             **request,

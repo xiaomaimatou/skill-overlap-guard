@@ -6,6 +6,12 @@ English · [简体中文](README.zh-CN.md)
 
 Skill Overlap Guard is a local tool for users of Codex, Claude Code, Cursor, and other Agent Skills runtimes. It inventories installed Skills, builds capability profiles, identifies duplicate or partial overlap, and records explicit user decisions.
 
+## V0.2: Pre-install Decision Assistant
+
+V0.2 automatically starts a read-only Pre-install Check when an Agent Skill installation intent is detected. The unified report keeps functional overlap, generalist/specialist scope, trigger conflicts, Health Score, source/commit evidence, and security signals independent. Security checks include prompt injection, dangerous commands, credential access, exfiltration, install hooks, obfuscation, traversal, and symlink escape.
+
+The scanner only reads candidate files and never executes candidate Skill code. V0.2 does not automatically install, delete, merge, replace, disable, or overwrite Skills. Managed installation and recovery remain V0.3 scope.
+
 ## Contents
 
 - [Why](#why)

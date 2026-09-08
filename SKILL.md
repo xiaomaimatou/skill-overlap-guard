@@ -9,6 +9,12 @@ description: >-
 
 # Skill Overlap Guard
 
+## V0.2 behavior
+
+When an Agent Skill installation intent is clear, run the read-only Pre-install Check automatically. Keep functional overlap, trigger conflict, health, source, and security evidence separate. Use the security precheck adapter and include file/line evidence where available. Never execute candidate code during analysis.
+
+V0.2 recommendations are advisory only. Do not automatically install, delete, merge, replace, disable, or overwrite Skills. Preserve the legacy `$skill-manager` alias while using `$skill-overlap-guard` as the current explicit trigger.
+
 Check and manage the **sibling skills** of this directory for one installed agent at a
 time. A single Skill Overlap Guard instance scans only its own parent directory,
 whether it is installed under a Claude Code, Cursor, or Codex CLI skills root.
@@ -163,9 +169,10 @@ Skill from GitHub, a local path, or Codex.
 
 **Always enter Skill Overlap Guard analysis first.** Resolve the source, build the
 candidate set against installed Skills, perform Semantic Review where needed,
-and present the Dedup Report. Never install before that check completes and the
-user explicitly confirms. In the current V0.1 phase, report the result only;
-do not invoke an installer.
+run the V0.2 health / trigger / security checks, and present the unified
+Pre-install Decision Report. Never install before that check completes and the
+user explicitly confirms. V0.2 remains report-only and does not invoke an
+installer.
 
 `$skill-overlap-guard` is the explicit fallback invocation when automatic
 routing is uncertain. The legacy `$skill-manager` alias remains accepted for
@@ -179,9 +186,9 @@ provided, return `dedup_status: blocked_pending_confirmation` with
 Report status only: `not_started`, `checking`, `clear`, `warning`, or
 `blocked_pending_confirmation`. HIGH / DUPLICATE requires the final status
 `blocked_pending_confirmation`; partial overlap is `warning`; a clear result
-is still analysis, not installation authorization. A future, separately
-approved phase may define an installation workflow. Do not `git clone` or run
-`install_skill.py` in this V0.1 stage.
+is still analysis, not installation authorization. A future V0.3 phase may
+define an installation workflow. Do not `git clone` or run `install_skill.py`
+from the V0.2 analysis path.
 
 ### Scenario D.1: explicit Terminal Dry-run Guard
 
