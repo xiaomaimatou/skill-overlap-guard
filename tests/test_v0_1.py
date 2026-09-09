@@ -51,7 +51,9 @@ class SkillManagerV01Tests(unittest.TestCase):
         for cached in (
             "_common", "check_remote", "concept_normalizer", "capability_parser",
             "decision_registry", "duplicate_scan", "blind_recall", "invocation_contract",
-            "source_loader", "terminal_guard", module_name,
+            "source_loader", "terminal_guard", "health_score", "trigger_conflict",
+            "security_precheck", "decision_engine", "preinstall_report", "manifest",
+            "source_metadata", "recommendation_policy", module_name,
         ):
             sys.modules.pop(cached, None)
         sys.path.insert(0, str(self.scripts))

@@ -41,7 +41,7 @@ def load_candidate_profile(source: dict, fetch_text=None) -> dict:
         path = Path(str(source.get("path") or source.get("source") or "")).expanduser()
         skill_dir = path.parent if path.name.casefold() == "skill.md" else path
         profile = parse_capability_profile(skill_dir)
-        return {**profile, "source_type": source_type, "source_url": str(path)}
+        return {**profile, "source_type": source_type, "source_url": str(path), "skill_dir": str(skill_dir)}
     if source_type not in {"github", "github_shorthand"}:
         raise ValueError("candidate source must be a local path or GitHub source")
 

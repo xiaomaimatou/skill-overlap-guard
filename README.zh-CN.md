@@ -6,6 +6,12 @@ English · 简体中文
 
 Skill Overlap Guard 是一个面向 Codex、Claude Code 和 Cursor 等 Agent Skills 用户的本地工具。它会扫描已安装的 Skill，提取能力画像，识别重复或部分重叠，并把用户对重叠关系的判断记录下来。
 
+## V0.2：安装决策助手
+
+V0.2 在识别到安装意图时自动进入只读 Pre-install Check，不要求用户额外输入“检查”或显式调用 `$skill-overlap-guard`。报告会分别展示功能重叠、通用 / 专项关系、触发冲突、Health Score、来源版本，以及 Prompt Injection、危险命令、凭证访问、数据外传、安装钩子和路径逃逸等安全信号。
+
+安全扫描只读取候选文件，不执行候选 Skill。V0.2 不会自动安装、删除、合并、替换、禁用或覆盖 Skill；正式安装事务属于 V0.3 范围。
+
 ## 目录
 
 - [为什么需要](#为什么需要)

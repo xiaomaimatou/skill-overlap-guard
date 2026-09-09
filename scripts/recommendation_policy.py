@@ -62,3 +62,23 @@ def recommendation_for(relationship: str, primary_a: str, primary_b: str,
         "protected_relationship": protected,
         "decision_options": _decision_options(protected),
     }
+
+
+def best_skill_recommendation(relationship: str, candidate: dict, installed: dict,
+                              candidate_health: dict | None = None,
+                              installed_health: dict | None = None,
+                              user_preference: str | None = None) -> str:
+    """Return a non-destructive preference label for a classified Skill pair."""
+    if user_preference in {"prefer_skill_a", "prefer_skill_b", "keep_both", "manual_review"}:
+        return user_preference
+    if relationship in {"parent-child", "complementary", "generalist-specialist", "unrelated"}:
+        return "keep_both"
+    if relationship not in {"duplicate", "high-overlap"}:
+        return "manual_review"
+    a_score = int((candidate_health or {}).get("score", 0))
+    b_score = int((installed_health or {}).get("score", 0))
+    if a_score and b_score and abs(a_score - b_score) >= 10:
+        return "prefer_skill_a" if a_score > b_score else "prefer_skill_b"
+    if candidate.get("primary_purpose") == installed.get("primary_purpose"):
+        return "manual_review"
+    return "keep_both"
