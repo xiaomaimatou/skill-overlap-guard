@@ -4,13 +4,15 @@ English · [简体中文](README.zh-CN.md)
 
 > Add a semantic deduplication gate to Agent Skill installation: check whether a new Skill is already covered before deciding whether to proceed.
 
+**Current release: v0.2.0**
+
 Skill Overlap Guard is a local tool for users of Codex, Claude Code, Cursor, and other Agent Skills runtimes. It inventories installed Skills, builds capability profiles, identifies duplicate or partial overlap, and records explicit user decisions.
 
 ## V0.2: Pre-install Decision Assistant
 
-V0.2 automatically starts a read-only Pre-install Check when an Agent Skill installation intent is detected. The unified report keeps functional overlap, generalist/specialist scope, trigger conflicts, Health Score, source/commit evidence, and security signals independent. Security checks include prompt injection, dangerous commands, credential access, exfiltration, install hooks, obfuscation, traversal, and symlink escape.
+V0.2 automatically starts a read-only Pre-install Check when an Agent Skill installation intent is detected. Security Risk and Overlap are calculated independently, and Security Risk has the highest veto priority.
 
-The scanner only reads candidate files and never executes candidate Skill code. V0.2 does not automatically install, delete, merge, replace, disable, or overwrite Skills. Managed installation and recovery remain V0.3 scope.
+The scanner only reads candidate files and never executes candidate Skill code. V0.2 does not automatically delete, merge, replace, disable, or overwrite existing Skills. Managed Installation and rollback remain V0.3 scope.
 
 ## Contents
 
@@ -44,7 +46,14 @@ Skill Overlap Guard turns installation checks into an explainable decision flow:
 | Inventory | Recursively discover Skills, parent-child relationships, sources, and remote update status. |
 | Capability Profile | Extract capabilities, triggers, workflows, inputs, outputs, tools, and dependencies from `SKILL.md`. |
 | Overlap Audit | Recall candidate pairs and produce explainable semantic overlap reports. |
-| Pre-install Check | Compare a new Skill with the installed inventory before installation. |
+| Automatic Pre-install Check | Detect install intent and run a read-only pre-install analysis automatically. |
+| Skill Health Score | Score responsibility clarity, structure, scope, dependencies, and source metadata. |
+| Best Skill Recommendation | Recommend `prefer_skill_a`, `prefer_skill_b`, `keep_both`, or `manual_review` without destructive action. |
+| Trigger / Description Conflict | Detect broad or competing descriptions and trigger scopes. |
+| Generalist vs Specialist | Distinguish shared scope from specialist-specific value. |
+| Security Precheck | Report prompt injection, dangerous commands, sensitive access, exfiltration, hooks, and path risks. |
+| Unified Decision Report | Combine Functional, Trigger, Health, Security, and Source evidence. |
+| Source / Commit Metadata | Surface repository, branch, commit, manifest, hashes, and scanner cache evidence. |
 | Dedup Gate | Warn and pause on `HIGH` / `DUPLICATE` relationships without deciding for the user. |
 | Decision Registry | Store explicit decisions in `decisions.json`. |
 | Terminal Guard | Optionally intercept `npx skills add` for a reversible dry-run check. |
@@ -54,7 +63,7 @@ Skill Overlap Guard turns installation checks into an explainable decision flow:
 Clone the repository alongside the Skills root used by your Agent runtime:
 
 ```bash
-git clone https://github.com/EfanWang/skill-overlap-guard.git
+git clone https://github.com/xiaomaimatou/skill-overlap-guard.git
 ```
 
 Requirements:
@@ -112,20 +121,18 @@ The available decisions are `keep_both`, `ignore`, `preferred_a`, `preferred_b`,
 ## How it works
 
 ```text
-New Skill source
+Install Intent
     ↓
-Read SKILL.md / build capability profile
+Read-only candidate load
     ↓
-Inventory installed Skills / recall candidates
+Security / Overlap / Trigger / Health / Source checks
     ↓
-Semantic review with parent-child protection
+Unified Decision Report
     ↓
-Overlap report
-    ↓
-User confirmation and decision record
+User decision
 ```
 
-V0.1 only analyzes, warns, and records decisions. It does not install a new Skill before explicit confirmation, and it never automatically deletes, merges, replaces, or disables an installed Skill.
+Security Risk has the highest veto priority and cannot be reduced by a low-overlap result. The report remains advisory: it does not automatically delete, merge, replace, or disable an existing Skill.
 
 ## Scan scope
 
@@ -159,8 +166,9 @@ Each Skill is a directory containing `SKILL.md`. Nested Skills are discovered re
 
 ## Known limitations
 
-- GitHub is the primary supported remote source in V0.1;
-- the V0.1 installation flow reports analysis results rather than automatically installing after the check;
+- V0.2 does not take over the final installation transaction;
+- Managed Installation and rollback are planned for V0.3;
+- security scanning can identify risk signals but cannot prove absolute safety;
 - local edits are not merged automatically;
 - plugin-managed and Cursor built-in Skills are outside the default scan scope;
 - incomplete or very short `SKILL.md` files may produce `uncertain` results;
@@ -176,10 +184,12 @@ python -m unittest discover -s tests -p 'test_*.py'
 
 ```text
 scripts/      inventory, overlap, source, decision, and Terminal Guard logic
-tests/        V0.1 behavior tests
+tests/        144 tests passed; V0.1 regression and V0.2 tests included
 decisions.json explicit user decisions
 example*.png  usage examples
 ```
+
+The V0.1 regression suite remains passing.
 
 ## Credits
 

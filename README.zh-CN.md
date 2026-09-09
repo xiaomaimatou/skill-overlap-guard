@@ -4,13 +4,15 @@ English · 简体中文
 
 > 给 Agent Skill 安装流程加一道语义查重闸门：先确认新 Skill 是否已经被现有能力覆盖，再决定是否继续。
 
+**当前版本：v0.2.0**
+
 Skill Overlap Guard 是一个面向 Codex、Claude Code 和 Cursor 等 Agent Skills 用户的本地工具。它会扫描已安装的 Skill，提取能力画像，识别重复或部分重叠，并把用户对重叠关系的判断记录下来。
 
 ## V0.2：安装决策助手
 
-V0.2 在识别到安装意图时自动进入只读 Pre-install Check，不要求用户额外输入“检查”或显式调用 `$skill-overlap-guard`。报告会分别展示功能重叠、通用 / 专项关系、触发冲突、Health Score、来源版本，以及 Prompt Injection、危险命令、凭证访问、数据外传、安装钩子和路径逃逸等安全信号。
+V0.2 在识别到 Agent Skill 安装意图时自动进入只读 Pre-install Check。Security Risk 与 Overlap 独立计算，Security Risk 拥有最高否决优先级。
 
-安全扫描只读取候选文件，不执行候选 Skill。V0.2 不会自动安装、删除、合并、替换、禁用或覆盖 Skill；正式安装事务属于 V0.3 范围。
+安全扫描只读取候选文件，不执行候选 Skill。V0.2 不会自动删除、合并、替换、禁用或覆盖已有 Skill；Managed Installation 与回滚属于 V0.3 范围。
 
 ## 目录
 
@@ -44,7 +46,14 @@ Skill Overlap Guard 将安装前检查变成一个可解释的决策流程：
 | Inventory | 递归扫描 Skill，并识别父子目录关系、来源和远程更新状态。 |
 | Capability Profile | 从 `SKILL.md` 提取能力、触发词、工作流、输入、输出、工具和依赖。 |
 | Overlap Audit | 对存量 Skill 做候选召回和语义复核，输出可解释的重叠关系。 |
-| Pre-install Check | 在新 Skill 进入安装流程前，与现有 Skill 做功能查重。 |
+| Automatic Pre-install Check | 识别安装意图并自动执行只读安装前检查。 |
+| Skill Health Score | 评估职责清晰度、结构、范围、依赖和来源元数据。 |
+| Best Skill Recommendation | 输出 `prefer_skill_a`、`prefer_skill_b`、`keep_both` 或 `manual_review`，不执行破坏性操作。 |
+| Trigger / Description Conflict | 识别过宽或相互竞争的 description 与触发范围。 |
+| Generalist vs Specialist | 区分共享范围与专项 Skill 的独有价值。 |
+| Security Precheck | 检查提示词注入、危险命令、敏感访问、数据外传、安装钩子和路径风险。 |
+| Unified Pre-install Decision Report | 汇总 Functional、Trigger、Health、Security 和 Source 证据。 |
+| Source / Commit Metadata | 展示仓库、分支、commit、manifest、哈希和扫描缓存证据。 |
 | Dedup Gate | 对 `HIGH` / `DUPLICATE` 关系给出阻断式提醒，不替用户做决定。 |
 | Decision Registry | 将用户决定写入 `decisions.json`，避免每次重复讨论同一对 Skill。 |
 | Terminal Guard | 可选地拦截 `npx skills add`，仅做可逆 dry-run 检查。 |
@@ -54,7 +63,7 @@ Skill Overlap Guard 将安装前检查变成一个可解释的决策流程：
 将仓库克隆到某个 Agent Skills 根目录的同级位置：
 
 ```bash
-git clone https://github.com/EfanWang/skill-overlap-guard.git
+git clone https://github.com/xiaomaimatou/skill-overlap-guard.git
 ```
 
 运行要求：
@@ -124,17 +133,15 @@ python scripts/decision_registry.py set \
 ## 工作原理
 
 ```text
-新 Skill 来源
+Install Intent
     ↓
-读取 SKILL.md / 建立能力画像
+Read-only candidate load
     ↓
-扫描已安装 Skill / 候选召回
+Security / Overlap / Trigger / Health / Source checks
     ↓
-语义复核与父子关系保护
+Unified Decision Report
     ↓
-输出重叠报告
-    ↓
-用户确认并记录决定
+User decision
 ```
 
 关系等级的含义：
@@ -146,7 +153,7 @@ python scripts/decision_registry.py set \
 - `parent-child`：目录结构上的父子 Skill，不直接判定为重复；
 - `uncertain`：证据不足，需要人工判断。
 
-V0.1 的 Dedup Gate 只负责分析、提醒和记录决定。它不会在用户明确确认前自动安装新 Skill，也不会因为发现重叠而自动删除、合并、替换或禁用现有 Skill。
+Security Risk 拥有最高否决优先级，不能因为 Overlap 较低而降低安全结论。报告只提供建议，不会自动删除、合并、替换或禁用已有 Skill。
 
 ## 扫描范围
 
@@ -180,8 +187,9 @@ V0.1 的 Dedup Gate 只负责分析、提醒和记录决定。它不会在用户
 
 ## 已知限制
 
-- V0.1 的远程来源主要支持 GitHub；
-- V0.1 的安装入口以“分析并报告”为主，不在查重完成后自动执行安装；
+- V0.2 不接管最终安装事务；
+- Managed Installation 与 rollback 属于 V0.3；
+- Security scanning 可以识别风险信号，但不能证明绝对安全；
 - 本地编辑不会自动合并到远程版本；
 - 插件托管的 Skill 和 Cursor 内置 Skill 不在默认扫描范围内；
 - 语义复核依赖 `SKILL.md` 中的可读证据，描述过短或结构不完整时可能返回 `uncertain`；
@@ -199,10 +207,12 @@ python -m unittest discover -s tests -p 'test_*.py'
 
 ```text
 scripts/      扫描、查重、来源、决策和 Terminal Guard
-tests/        V0.1 行为测试
+tests/        144 tests passed；包含 V0.1 regression 与 V0.2 tests
 decisions.json 用户决策登记
 example*.png  使用示例
 ```
+
+V0.1 regression 仍然通过。
 
 ## 致谢
 
